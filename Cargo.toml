@@ -1,0 +1,20 @@
+[package]
+name = "mindmap-egui"
+version = "1.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Lightweight native mind mapping and diagram editor"
+
+[dependencies]
+eframe = { version = "=0.37.0", default-features = false, features = ["glow", "default_fonts", "system_fonts", "clipboard", "x11", "wayland"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rfd = "=0.17.2"
+arboard = "=3.7.0"
+resvg = "=0.48.1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

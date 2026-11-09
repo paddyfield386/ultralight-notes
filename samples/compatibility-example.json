@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "next_id": 38,
+  "nodes": [
+    {"id":1,"parent":null,"title":"プロダクト開発計画","offset":{"x":0.0,"y":0.0},"collapsed":false},
+    {"id":24,"parent":1,"title":"互換テスト","offset":{"x":0.0,"y":0.0},"collapsed":false},
+    {"id":29,"parent":1,"title":"操作例","offset":{"x":0.0,"y":0.0},"collapsed":false},
+    {"id":26,"parent":24,"title":"入力時","offset":{"x":0.0,"y":0.0},"collapsed":false},
+    {"id":33,"parent":24,"title":"リボンバー","offset":{"x":0.0,"y":0.0},"collapsed":false},
+    {"id":25,"parent":26,"title":"日本語入力の余Whiteを確認する","offset":{"x":0.0,"y":0.0},"collapsed":false},
+    {"id":27,"parent":26,"title":"文字入力時のサイズを確認する","offset":{"x":0.0,"y":0.0},"collapsed":false},
+    {"id":31,"parent":26,"title":"Edit時のレイアウトを確認する","offset":{"x":0.0,"y":0.0},"collapsed":false},
+    {"id":30,"parent":29,"title":"自由配置Text","offset":{"x":0.0,"y":0.0},"collapsed":false},
+    {"id":32,"parent":29,"title":"リボンのView構成","offset":{"x":0.0,"y":0.0},"collapsed":false},
+    {"id":36,"parent":29,"title":"構造化JSONのコピー","offset":{"x":0.0,"y":0.0},"collapsed":false},
+    {"id":37,"parent":29,"title":"File Operations","offset":{"x":0.0,"y":0.0},"collapsed":false},
+    {"id":34,"parent":33,"title":"レイアウト操作の名称","offset":{"x":0.0,"y":0.0},"collapsed":false},
+    {"id":35,"parent":30,"title":"参考配置例","offset":{"x":0.0,"y":0.0},"collapsed":false}
+  ]
+}

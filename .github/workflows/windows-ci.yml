@@ -1,0 +1,12 @@
+name: Windows check
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test model and layout
+        run: cargo test --locked
+      - name: Build executable
+        run: cargo build --release --locked

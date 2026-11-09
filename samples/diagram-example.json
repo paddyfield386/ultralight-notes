@@ -1,0 +1,560 @@
+{
+  "version": 2,
+  "next_id": 24,
+  "nodes": [
+    {
+      "id": 1,
+      "parent": null,
+      "title": "プロダクト開発計画",
+      "offset": {
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "id": 2,
+      "parent": 1,
+      "title": "市場・ユーザー",
+      "offset": {
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "id": 3,
+      "parent": 2,
+      "title": "市場分析",
+      "offset": {
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "id": 4,
+      "parent": 2,
+      "title": "ユーザー調査",
+      "offset": {
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "id": 5,
+      "parent": 2,
+      "title": "ニーズのArrange",
+      "offset": {
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "id": 6,
+      "parent": 1,
+      "title": "企画・要件",
+      "offset": {
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "id": 7,
+      "parent": 6,
+      "title": "プロダクト方針",
+      "offset": {
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "id": 8,
+      "parent": 6,
+      "title": "要件定義",
+      "offset": {
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "id": 9,
+      "parent": 8,
+      "title": "機能要件",
+      "offset": {
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "id": 10,
+      "parent": 8,
+      "title": "非機能要件",
+      "offset": {
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "id": 11,
+      "parent": 6,
+      "title": "優先度の決定",
+      "offset": {
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "id": 12,
+      "parent": 1,
+      "title": "設計",
+      "offset": {
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "id": 13,
+      "parent": 12,
+      "title": "システム設計",
+      "offset": {
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "id": 14,
+      "parent": 12,
+      "title": "UI/UX設計",
+      "offset": {
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "id": 15,
+      "parent": 1,
+      "title": "開発",
+      "offset": {
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "id": 16,
+      "parent": 15,
+      "title": "開発計画",
+      "offset": {
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "id": 17,
+      "parent": 15,
+      "title": "実装",
+      "offset": {
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "id": 18,
+      "parent": 1,
+      "title": "品質・テスト",
+      "offset": {
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "id": 19,
+      "parent": 18,
+      "title": "テスト計画",
+      "offset": {
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "id": 20,
+      "parent": 18,
+      "title": "品質改善",
+      "offset": {
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "id": 21,
+      "parent": 1,
+      "title": "リリース・Expand",
+      "offset": {
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "id": 22,
+      "parent": 21,
+      "title": "リリース準備",
+      "offset": {
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "id": 23,
+      "parent": 21,
+      "title": "Expand後の対応",
+      "offset": {
+        "x": 0.0,
+        "y": 0.0
+      }
+    }
+  ],
+  "next_canvas_id": 11,
+  "shapes": [
+    {
+      "id": 1,
+      "kind": "rectangle",
+      "position": {
+        "x": 700.0,
+        "y": -220.0
+      },
+      "width": 200.0,
+      "height": 100.0,
+      "z": 0,
+      "visible": true,
+      "locked": false,
+      "style": {
+        "fill": [
+          234,
+          241,
+          252
+        ],
+        "outline": [
+          128,
+          158,
+          210
+        ],
+        "text": [
+          38,
+          52,
+          75
+        ],
+        "stroke_width": 1.5
+      },
+      "text": "設計メモ"
+    },
+    {
+      "id": 2,
+      "kind": "ellipse",
+      "position": {
+        "x": 950.0,
+        "y": -170.0
+      },
+      "width": 180.0,
+      "height": 100.0,
+      "z": 1,
+      "visible": true,
+      "locked": false,
+      "style": {
+        "fill": [
+          234,
+          241,
+          252
+        ],
+        "outline": [
+          128,
+          158,
+          210
+        ],
+        "text": [
+          38,
+          52,
+          75
+        ],
+        "stroke_width": 1.5
+      },
+      "text": "要件確認"
+    },
+    {
+      "id": 4,
+      "kind": "diamond",
+      "position": {
+        "x": 730.0,
+        "y": 160.0
+      },
+      "width": 190.0,
+      "height": 110.0,
+      "z": 4,
+      "visible": true,
+      "locked": false,
+      "text": "Decision",
+      "style": {
+        "fill": [
+          235,
+          242,
+          252
+        ],
+        "outline": [
+          116,
+          151,
+          216
+        ],
+        "text": [
+          38,
+          52,
+          75
+        ],
+        "stroke_width": 2.0,
+        "text_size": 15.0,
+        "text_horizontal": "center",
+        "text_vertical": "center"
+      }
+    },
+    {
+      "id": 5,
+      "kind": "parallelogram",
+      "position": {
+        "x": 980.0,
+        "y": 160.0
+      },
+      "width": 190.0,
+      "height": 110.0,
+      "z": 5,
+      "visible": true,
+      "locked": false,
+      "text": "入力・出力",
+      "style": {
+        "fill": [
+          235,
+          242,
+          252
+        ],
+        "outline": [
+          116,
+          151,
+          216
+        ],
+        "text": [
+          38,
+          52,
+          75
+        ],
+        "stroke_width": 2.0,
+        "text_size": 15.0,
+        "text_horizontal": "center",
+        "text_vertical": "center"
+      }
+    },
+    {
+      "id": 6,
+      "kind": "cylinder",
+      "position": {
+        "x": 1230.0,
+        "y": 160.0
+      },
+      "width": 190.0,
+      "height": 110.0,
+      "z": 6,
+      "visible": true,
+      "locked": false,
+      "text": "データベース",
+      "style": {
+        "fill": [
+          235,
+          242,
+          252
+        ],
+        "outline": [
+          116,
+          151,
+          216
+        ],
+        "text": [
+          38,
+          52,
+          75
+        ],
+        "stroke_width": 2.0,
+        "text_size": 15.0,
+        "text_horizontal": "center",
+        "text_vertical": "center"
+      }
+    },
+    {
+      "id": 7,
+      "kind": "hexagon",
+      "position": {
+        "x": 1480.0,
+        "y": 160.0
+      },
+      "width": 190.0,
+      "height": 110.0,
+      "z": 7,
+      "visible": true,
+      "locked": false,
+      "text": "準備",
+      "style": {
+        "fill": [
+          235,
+          242,
+          252
+        ],
+        "outline": [
+          116,
+          151,
+          216
+        ],
+        "text": [
+          38,
+          52,
+          75
+        ],
+        "stroke_width": 2.0,
+        "text_size": 15.0,
+        "text_horizontal": "center",
+        "text_vertical": "center"
+      }
+    },
+    {
+      "id": 8,
+      "kind": "document",
+      "position": {
+        "x": 1730.0,
+        "y": 160.0
+      },
+      "width": 190.0,
+      "height": 110.0,
+      "z": 8,
+      "visible": true,
+      "locked": false,
+      "text": "ドキュメント",
+      "style": {
+        "fill": [
+          235,
+          242,
+          252
+        ],
+        "outline": [
+          116,
+          151,
+          216
+        ],
+        "text": [
+          38,
+          52,
+          75
+        ],
+        "stroke_width": 2.0,
+        "text_size": 15.0,
+        "text_horizontal": "center",
+        "text_vertical": "center"
+      }
+    }
+  ],
+  "connectors": [
+    {
+      "id": 3,
+      "from": {
+        "target": {
+          "kind": "shape",
+          "id": 1
+        },
+        "anchor": "right"
+      },
+      "to": {
+        "target": {
+          "kind": "shape",
+          "id": 2
+        },
+        "anchor": "left"
+      },
+      "color": [
+        109,
+        128,
+        162
+      ],
+      "width": 2.0,
+      "arrow": true,
+      "route": "orthogonal",
+      "label": "要件を確認",
+      "dash": "dashed",
+      "arrow_start": false,
+      "label_background": [
+        255,
+        255,
+        255
+      ]
+    },
+    {
+      "id": 9,
+      "from": {
+        "target": {
+          "kind": "shape",
+          "id": 4
+        },
+        "anchor": "right"
+      },
+      "to": {
+        "target": {
+          "kind": "shape",
+          "id": 5
+        },
+        "anchor": "left"
+      },
+      "color": [
+        85,
+        129,
+        216
+      ],
+      "width": 2.0,
+      "arrow": true,
+      "arrow_start": false,
+      "route": "orthogonal",
+      "mode": "auto",
+      "dash": "dotted",
+      "label": "Decision結果",
+      "label_fraction": 0.5,
+      "label_visible": true
+    },
+    {
+      "id": 10,
+      "from": {
+        "target": {
+          "kind": "shape",
+          "id": 6
+        },
+        "anchor": "right"
+      },
+      "to": {
+        "target": {
+          "kind": "shape",
+          "id": 7
+        },
+        "anchor": "left"
+      },
+      "color": [
+        85,
+        129,
+        216
+      ],
+      "width": 2.0,
+      "arrow": true,
+      "arrow_start": true,
+      "route": "polyline",
+      "mode": "manual",
+      "dash": "solid",
+      "label": "同期データ",
+      "label_fraction": 0.5,
+      "label_visible": true,
+      "waypoints": [
+        {
+          "x": 1300.0,
+          "y": 330.0
+        }
+      ]
+    }
+  ],
+  "canvas_groups": [],
+  "next_canvas_group_id": 1
+}
