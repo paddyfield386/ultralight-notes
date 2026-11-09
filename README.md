@@ -28,7 +28,7 @@ Choose a shape from the ribbon and place it on the canvas. Drag from a connectio
 
 ## Development
 
-Maintainer: paddyfield386. OpenAI Codex was used as a coding assistant in developing this project. The project maintainer is responsible for design decisions, reviewing the work, and publication.
+Maintainer: paddyfield386. OpenAI Codex was used as a coding assistant in developing this project. 
 
 ## Licenses
 
