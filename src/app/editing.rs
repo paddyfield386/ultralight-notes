@@ -239,6 +239,17 @@ impl MindmapApp {
             return;
         }
         if self.editing.is_some() || self.editing_text_box.is_some() || self.editing_shape.is_some() || self.editing_connector.is_some() { return; }
+        if let Some(key)=arrows {
+            let movable=self.canvas_selection.iter().any(|t|matches!(t,CanvasTarget::Node(_) | CanvasTarget::Shape(_) | CanvasTarget::TextBox(_) | CanvasTarget::Line(_)));
+            if movable && !ctrl {
+                let step=if shift {5.0}else{1.0};
+                let delta=match key {
+                    egui::Key::ArrowLeft=>Vec2::new(-step,0.0), egui::Key::ArrowRight=>Vec2::new(step,0.0),
+                    egui::Key::ArrowUp=>Vec2::new(0.0,-step), egui::Key::ArrowDown=>Vec2::new(0.0,step), _=>Vec2::ZERO,
+                };
+                self.checkpoint(); self.move_canvas_selection(delta); return;
+            }
+        }
         if ctrl && ctx.input(|i|i.key_pressed(egui::Key::D)) {
             self.duplicate_canvas_selection();return;
         }

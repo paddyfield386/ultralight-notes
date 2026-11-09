@@ -66,9 +66,9 @@ impl MindmapApp {
         match result {
             Ok(doc) => {
                 let path = std::fs::canonicalize(&path).unwrap_or(path);
-                self.doc = doc; self.selected = self.doc.roots()[0];
+                self.doc = doc; self.selected = self.doc.roots().first().copied().unwrap_or(ROOT);
                 self.reset_canvas_ephemeral();
-                self.selection = HashSet::from([self.selected]); self.current_path = Some(path.clone());
+                self.selection.clear(); if self.doc.node(self.selected).is_some(){self.selection.insert(self.selected);} self.current_path = Some(path.clone());
                 self.remember(path); self.undo.clear(); self.redo.clear();
                 self.dragging = None; self.drag_moving.clear(); self.middle_pan = false; self.drop_intent = None; self.editing = None;
                 self.pan = Vec2::ZERO; self.zoom = 0.92; self.dirty = false;

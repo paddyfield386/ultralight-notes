@@ -2,6 +2,91 @@
 use crate::canvas_core::{Anchor, ConnectorRoute, ConnectorMode, CanvasConnector, ShapeKind};
 use crate::mindmap_core::Offset;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RouteObstacle { pub left: f32, pub top: f32, pub right: f32, pub bottom: f32 }
+
+fn blocked(p: Offset, obstacles: &[RouteObstacle]) -> bool {
+    obstacles.iter().any(|o| p.x > o.left && p.x < o.right && p.y > o.top && p.y < o.bottom)
+}
+
+/// Automatic orthogonal route which keeps the anchors fixed and detours around
+/// expanded obstacle rectangles. Candidate bends are generated from obstacle
+/// edges, so the route remains stable while adding as few corners as possible.
+pub fn route_points_avoiding(connector: &CanvasConnector, start: Offset, end: Offset, obstacles: &[RouteObstacle]) -> Vec<Offset> {
+    if connector.mode != ConnectorMode::Auto || obstacles.is_empty() {
+        return route_points(connector, start, end);
+    }
+    // A straight/polyline connector that intersects an object is promoted to
+    // an orthogonal detour for this automatic render pass. The stored route
+    // style remains unchanged, so editing/history behavior is preserved.
+    let mut routed=connector.clone();
+    routed.route=ConnectorRoute::Orthogonal;
+    // Keep a short normal segment at each anchor so the connector always
+    // leaves/enters the object's surface perpendicularly.
+    let clearance = 24.0;
+    let normal = |p: Offset, anchor: Anchor, distance: f32| match anchor {
+        Anchor::Left => Offset{x:p.x-distance,y:p.y}, Anchor::Right => Offset{x:p.x+distance,y:p.y},
+        Anchor::Top => Offset{x:p.x,y:p.y-distance}, Anchor::Bottom => Offset{x:p.x,y:p.y+distance},
+    };
+    // Shorten the stubs when another expanded obstacle is close to the
+    // anchor. Otherwise a perfectly routable narrow gap falls back to a
+    // direct line through the intervening node.
+    let stub_distance = |p: Offset, anchor: Anchor| {
+        let mut distance: f32=clearance;
+        for o in obstacles {
+            let gap=match anchor {
+                Anchor::Left if p.y>o.top && p.y<o.bottom && o.right<=p.x => Some(p.x-o.right),
+                Anchor::Right if p.y>o.top && p.y<o.bottom && o.left>=p.x => Some(o.left-p.x),
+                Anchor::Top if p.x>o.left && p.x<o.right && o.bottom<=p.y => Some(p.y-o.bottom),
+                Anchor::Bottom if p.x>o.left && p.x<o.right && o.top>=p.y => Some(o.top-p.y),
+                _ => None,
+            };
+            if let Some(gap)=gap { distance=distance.min(gap * 0.5); }
+        }
+        distance
+    };
+    let start_stub=normal(start,routed.from.anchor,stub_distance(start,routed.from.anchor));
+    let end_stub=normal(end,routed.to.anchor,stub_distance(end,routed.to.anchor));
+    let mut xs = vec![start_stub.x, end_stub.x];
+    let mut ys = vec![start_stub.y, end_stub.y];
+    for o in obstacles {
+        xs.extend([o.left, o.right]); ys.extend([o.top, o.bottom]);
+    }
+    xs.sort_by(|a,b| a.total_cmp(b)); xs.dedup_by(|a,b| (*a-*b).abs()<0.01);
+    ys.sort_by(|a,b| a.total_cmp(b)); ys.dedup_by(|a,b| (*a-*b).abs()<0.01);
+    let mut points = Vec::new();
+    for &y in &ys { for &x in &xs { let p=Offset{x,y}; if !blocked(p,obstacles) { points.push(p); } } }
+    let nearest = |p: Offset| points.iter().position(|q| (q.x-p.x).abs()<0.01 && (q.y-p.y).abs()<0.01);
+    let (Some(si),Some(ei))=(nearest(start_stub),nearest(end_stub)) else { return Vec::new(); };
+    let mut dist=vec![f32::INFINITY;points.len()]; let mut prev:Vec<Option<usize>>=vec![None;points.len()]; let mut used=vec![false;points.len()]; dist[si]=0.0;
+    for _ in 0..points.len() {
+        let Some((u,_))=dist.iter().enumerate().filter(|(i,d)|!used[*i]&&d.is_finite()).min_by(|a,b|a.1.total_cmp(b.1)) else {break};
+        used[u]=true; if u==ei {break;}
+        for v in 0..points.len() { if used[v] {continue;} let a=points[u];let b=points[v];
+            if (a.x-b.x).abs()>0.01 && (a.y-b.y).abs()>0.01 {continue;}
+            // Do not immediately reverse back along an endpoint stub. Such
+            // U-turns draw a spurious overhanging segment beyond the junction.
+            let dot = |x: Offset, y: Offset| x.x*y.x+x.y*y.y;
+            if u==si && dot(Offset{x:b.x-a.x,y:b.y-a.y},Offset{x:start_stub.x-start.x,y:start_stub.y-start.y}) < -0.001 {continue;}
+            if v==ei && dot(Offset{x:b.x-a.x,y:b.y-a.y},Offset{x:end.x-end_stub.x,y:end.y-end_stub.y}) < -0.001 {continue;}
+            let blocked_seg=obstacles.iter().any(|o| {
+                if (a.x-b.x).abs()<0.01 { a.x>o.left&&a.x<o.right&&a.y.min(b.y)<o.bottom&&a.y.max(b.y)>o.top }
+                else { a.y>o.top&&a.y<o.bottom&&a.x.min(b.x)<o.right&&a.x.max(b.x)>o.left }
+            });
+            if blocked_seg {continue;}
+            let bend=if prev[u].is_some_and(|p| { let q=points[p]; ((q.x-a.x).abs()>0.01) != ((a.x-b.x).abs()>0.01) }) { 8.0 } else {0.0};
+            let nd=dist[u]+(a.x-b.x).abs()+(a.y-b.y).abs()+bend;
+            if nd<dist[v] {dist[v]=nd;prev[v]=Some(u);}
+        }
+    }
+    if !dist[ei].is_finite() { return Vec::new(); }
+    let mut out=Vec::new(); let mut i=ei; out.push(points[i]); while let Some(p)=prev[i] {i=p;out.push(points[i]);} out.reverse();
+    let mut compact:Vec<Offset>=Vec::new(); for p in out { if compact.len()<2 || {let a=compact[compact.len()-2];let b=*compact.last().unwrap(); (a.x-b.x).abs()>0.01 || (b.x-p.x).abs()>0.01 || (a.y-b.y).abs()>0.01 || (b.y-p.y).abs()>0.01} {compact.push(p);} }
+    let mut result=Vec::with_capacity(compact.len()+2);
+    result.push(start); result.extend(compact); result.push(end);
+    result
+}
+
 pub fn shape_vertices(kind: ShapeKind, x: f32, y: f32, width: f32, height: f32) -> Option<Vec<Offset>> {
     let normalized: &[(f32, f32)] = match kind {
         ShapeKind::Diamond => &[(0.5,0.0),(1.0,0.5),(0.5,1.0),(0.0,0.5)],
@@ -123,6 +208,58 @@ mod tests {
         let points=route_points(&c,a,b);
         assert_eq!(points.first(),Some(&a));assert_eq!(points.last(),Some(&b));
         assert!(points.windows(2).all(|x|(x[0].x-x[1].x).abs()<0.001||(x[0].y-x[1].y).abs()<0.001));
+    }
+    #[test]
+    fn automatic_route_detours_around_obstacle() {
+        let c=connector(ConnectorRoute::Orthogonal);
+        let a=Offset{x:20.0,y:60.0}; let b=Offset{x:380.0,y:60.0};
+        let obstacle=RouteObstacle{left:150.0,top:20.0,right:250.0,bottom:100.0};
+        let path=route_points_avoiding(&c,a,b,&[obstacle]);
+        assert!(path.len()>2);
+        assert!(path.windows(2).all(|w| {
+            let (p,q)=(w[0],w[1]);
+            !((p.x-q.x).abs()<0.01 && p.x>obstacle.left && p.x<obstacle.right && p.y.min(q.y)<obstacle.bottom && p.y.max(q.y)>obstacle.top)
+        }));
+    }
+    #[test]
+    fn offset_right_ports_do_not_overshoot_and_reverse() {
+        let mut c=connector(ConnectorRoute::Orthogonal);
+        c.from.anchor=Anchor::Right; c.to.anchor=Anchor::Right;
+        let start=Offset{x:100.0,y:25.0}; let end=Offset{x:116.0,y:95.0};
+        let obstacles=[RouteObstacle{left:0.0,top:0.0,right:100.0,bottom:50.0},
+            RouteObstacle{left:16.0,top:70.0,right:116.0,bottom:120.0}];
+        let path=route_points_avoiding(&c,start,end,&obstacles);
+        assert!(path.len()>=4, "missing route: {path:?}");
+        let before=path[path.len()-3]; let stub=path[path.len()-2];
+        assert!((stub.x-before.x)*(end.x-stub.x)+(stub.y-before.y)*(end.y-stub.y)>=-0.001,
+            "route reverses over its end stub: {path:?}");
+        let stub=path[1]; let next=path[2];
+        assert!((next.x-stub.x)*(stub.x-start.x)+(next.y-stub.y)*(stub.y-start.y)>=-0.001,
+            "route reverses over its start stub: {path:?}");
+    }
+    #[test]
+    fn tight_vertical_gap_does_not_fall_back_through_middle_node() {
+        let mut c=connector(ConnectorRoute::Orthogonal);
+        c.from.anchor=Anchor::Bottom; c.to.anchor=Anchor::Top;
+        let start=Offset{x:50.0,y:50.0}; let end=Offset{x:50.0,y:110.0};
+        let obstacles=[
+            RouteObstacle{left:0.0,top:0.0,right:100.0,bottom:50.0},
+            RouteObstacle{left:10.0,top:58.0,right:90.0,bottom:102.0},
+            RouteObstacle{left:0.0,top:110.0,right:100.0,bottom:160.0},
+        ];
+        let path=route_points_avoiding(&c,start,end,&obstacles);
+        assert!(path.len()>2, "expected an actual detour: {path:?}");
+        assert_eq!(path.first(),Some(&start)); assert_eq!(path.last(),Some(&end));
+        for segment in path.windows(2) {
+            let (a,b)=(segment[0],segment[1]);
+            assert!(obstacles.iter().all(|o| {
+                if (a.x-b.x).abs()<0.001 {
+                    !(a.x>o.left && a.x<o.right && a.y.min(b.y)<o.bottom && a.y.max(b.y)>o.top)
+                } else {
+                    (a.y-b.y).abs()<0.001 && !(a.y>o.top && a.y<o.bottom && a.x.min(b.x)<o.right && a.x.max(b.x)>o.left)
+                }
+            }), "segment {a:?} -> {b:?} crosses a node");
+        }
     }
     #[test]
     fn waypoint_and_label_fraction_are_stable() {

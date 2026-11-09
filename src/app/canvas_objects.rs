@@ -5,12 +5,16 @@ use super::*;
 impl MindmapApp {
     pub(super) fn reset_canvas_ephemeral(&mut self) {
         self.canvas_selection.clear();
-        self.canvas_selection.insert(CanvasTarget::Node(self.doc.roots().first().copied().unwrap_or(ROOT)));
+        if let Some(root)=self.doc.roots().first().copied(){self.canvas_selection.insert(CanvasTarget::Node(root));}
         self.selected_shape = None;
+        self.selected_text_box=None;
         self.selected_line=None;
         self.context_line=None;
         self.insert_line_mode=false;
         self.selected_connector = None;
+        self.selected_connectors.clear();self.selected_link=None;self.link_origin=None;
+        self.context_target=None;self.context_text_box=None;self.context_link=None;
+        self.insert_text_box_mode=false;
         self.context_shape = None;
         self.context_connector = None;
         self.insert_connector_mode = false;
@@ -110,7 +114,7 @@ impl MindmapApp {
             .filter(|s|self.shape_screen_rect(s.id,origin).is_some_and(|r|r.contains(pos)))
             .max_by_key(|s|(s.z,s.id)).map(|s|s.id)
     }
-    /// Eight visible handles, all with a larger 18px hit area for touchpads.
+    /// One square handle per side, with a larger 18px hit area for touchpads.
     /// This function is shared by painting and hit-testing so the visuals
     /// always match the actual resize target.
     pub(super) fn resize_handles(&self, id: u64, origin: Pos2) -> Option<Vec<(ResizeEdge,Rect)>> {
@@ -118,10 +122,8 @@ impl MindmapApp {
         if !s.visible || s.locked || !self.canvas_selection.contains(&CanvasTarget::Shape(id)) { return None; }
         let r = self.shape_screen_rect(id, origin)?;
         let points = [
-            (ResizeEdge::TopLeft,r.left_top()), (ResizeEdge::Top,r.center_top()),
-            (ResizeEdge::TopRight,r.right_top()), (ResizeEdge::Right,r.right_center()),
-            (ResizeEdge::BottomRight,r.right_bottom()), (ResizeEdge::Bottom,r.center_bottom()),
-            (ResizeEdge::BottomLeft,r.left_bottom()), (ResizeEdge::Left,r.left_center()),
+            (ResizeEdge::Top,r.center_top()), (ResizeEdge::Right,r.right_center()),
+            (ResizeEdge::Bottom,r.center_bottom()), (ResizeEdge::Left,r.left_center()),
         ];
         Some(points.into_iter().map(|(edge,p)|
             (edge,Rect::from_center_size(p,egui::vec2(18.0,18.0)))).collect())
@@ -186,7 +188,10 @@ impl MindmapApp {
     pub(super) fn find_anchor(&self,pointer:Pos2,positions:&HashMap<NodeId,Position>,origin:Pos2)->Option<ConnectorEnd> {
         // A user can drag from a visible handle without selecting the insertion tool.
         // Prefer already selected objects, then any hovered object.
-        let selected=self.canvas_selection.iter().copied();
+        // A selected shape uses the square resize handles. Its connector
+        // circles are deliberately hidden to make the two interactions clear.
+        let selected = (!self.selected_shape.is_some()).then(|| self.canvas_selection.iter().copied())
+            .into_iter().flatten();
         let others=self.doc.shapes.iter().filter(|s|s.visible).map(|s|CanvasTarget::Shape(s.id))
             .chain(self.doc.text_boxes.iter().map(|b|CanvasTarget::TextBox(b.id)))
             .chain(self.doc.nodes.iter().filter(|node|positions.contains_key(&node.id)).map(|node|CanvasTarget::Node(node.id)));
@@ -238,6 +243,7 @@ impl MindmapApp {
             .unwrap_or(Anchor::Left)
     }
     /// Pick the geometrically nearest source circle to the destination circle.
+    #[cfg(test)]
     pub(super) fn facing_source_anchor(source:Rect,destination:Pos2)->Anchor {
         Self::closest_anchor(source,destination)
     }
@@ -258,7 +264,7 @@ impl MindmapApp {
     pub(super) fn paint_canvas_connectors(&self,painter:&egui::Painter,positions:&HashMap<NodeId,Position>,origin:Pos2){
         for c in &self.doc.connectors {self.paint_connector(painter,c,positions,origin);}
     }
-    pub(super) fn paint_canvas_shapes(&self, painter: &egui::Painter, origin: Pos2) {
+    pub(super) fn paint_canvas_shapes(&self, painter: &egui::Painter, origin: Pos2, hover: Option<Pos2>) {
         let mut ordered:Vec<_>=self.doc.shapes.iter().filter(|s|s.visible&&s.kind!=ShapeKind::Frame)
             .map(|s|(s.z,s.id,false)).chain(self.doc.lines.iter().filter(|l|l.visible)
                 .map(|l|(l.z,l.id,true))).collect();
@@ -279,8 +285,9 @@ impl MindmapApp {
                     if let Some(handles)=self.resize_handles(s.id,origin) {
                         for (_,hit) in handles {
                             let h=Rect::from_center_size(hit.center(),egui::vec2(9.0,9.0));
-                            painter.rect_filled(h,2.0,Color32::WHITE);
-                            painter.rect_stroke(h,2.0,Stroke::new(1.0,ACCENT),StrokeKind::Inside);
+                            let hovered = hover.is_some_and(|pointer| hit.contains(pointer));
+                            painter.rect_filled(h,2.0,if hovered { ACCENT } else { Color32::WHITE });
+                            painter.rect_stroke(h,2.0,Stroke::new(1.0,if hovered { Color32::WHITE } else { ACCENT }),StrokeKind::Inside);
                         }
                     }
                 }
@@ -310,14 +317,17 @@ impl MindmapApp {
         // Keep circles visible when moving between an object and its boundary.
         let hovered_anchor_target=hover.and_then(|p|self.find_anchor(p,positions,origin))
             .map(|endpoint|endpoint.target);
-        let selected=self.canvas_selection.iter().copied();
+        let hide_ports = !connecting && (self.selected_shape.is_some() || self.selected_text_box.is_some());
+        let selected=(!hide_ports).then(|| self.canvas_selection.iter().copied())
+            .into_iter().flatten();
         let others=if connecting {
             self.doc.shapes.iter().filter(|s|s.visible).map(|s|CanvasTarget::Shape(s.id))
                 .chain(self.doc.text_boxes.iter().map(|b|CanvasTarget::TextBox(b.id)))
                 .chain(self.doc.nodes.iter().filter(|node|positions.contains_key(&node.id))
                     .map(|node|CanvasTarget::Node(node.id))).collect::<Vec<_>>()
         }else{Vec::new()};
-        let targets=selected.chain(others).chain(hovered_target).chain(hovered_anchor_target);
+        let hovered_targets = (!hide_ports).then_some((hovered_target, hovered_anchor_target));
+        let targets=selected.chain(others).chain(hovered_targets.into_iter().flat_map(|(a,b)| [a,b].into_iter().flatten()));
         let mut visited=HashSet::new();
         let mut painted:Vec<Pos2>=Vec::new();
         for target in targets {
@@ -408,13 +418,13 @@ mod resize_regressions {
     use super::*;
 
     #[test]
-    fn eight_handles_are_visible_and_hit_test_matches() {
+    fn four_side_handles_are_visible_and_hit_test_matches() {
         let mut app=MindmapApp::new(std::time::Instant::now(),None,false);
         let id=app.doc.add_shape(ShapeKind::Rectangle,Offset{x:100.0,y:140.0});
         app.zoom=1.0;
         app.canvas_selection.insert(CanvasTarget::Shape(id));
         let handles=app.resize_handles(id,Pos2::ZERO).unwrap();
-        assert_eq!(handles.len(),8);
+        assert_eq!(handles.len(),4);
         for (edge,area) in handles {
             assert_eq!(app.resize_handle_at(id,Pos2::ZERO,area.center()),Some(edge));
         }

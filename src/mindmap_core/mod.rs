@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use crate::frame_grid::FrameGrid;
-use crate::canvas_core::{CanvasShape, CanvasLine, CanvasConnector, CanvasGroup, CanvasTarget, ShapeKind, CanvasStyle, ConnectorEnd, validate_shapes};
+use crate::canvas_core::{CanvasShape, CanvasLine, CanvasConnector, CanvasGroup, CanvasTarget, ShapeKind, CanvasStyle, ConnectorEnd, TextHorizontal, TextVertical, validate_shapes};
 
 pub type NodeId = u64;
 pub const ROOT: NodeId = 1;
@@ -103,10 +103,17 @@ pub struct TextBox {
     /// Explicit no-outline, separately from the older legacy default border.
     #[serde(default, skip_serializing_if = "is_false")]
     pub border_none: bool,
+    /// Text placement inside the annotation. Defaults retain the legacy
+    /// top-left annotation layout when opening existing documents.
+    #[serde(default)]
+    pub text_horizontal: TextHorizontal,
+    #[serde(default = "default_text_vertical")]
+    pub text_vertical: TextVertical,
 }
 fn is_false(value: &bool) -> bool { !*value }
 fn default_text_width() -> f32 { 300.0 }
 fn default_text_height() -> f32 { 100.0 }
+fn default_text_vertical() -> TextVertical { TextVertical::Top }
 
 /// A non-hierarchical, undirected relationship between two nodes.
 /// Unlike `Node::parent`, this does not affect tree layout or ownership.
@@ -178,6 +185,7 @@ impl Document {
     }
 
     /// Sample matching the approved compact, right-only design.
+    #[cfg(test)]
     pub fn sample_design() -> Self {
         let mut doc = Self::blank();
         doc.node_mut(ROOT).unwrap().title = "Product Development Plan".into();
@@ -239,12 +247,13 @@ impl Document {
     pub fn add_map(&mut self, title: impl Into<String>) -> NodeId {
         let id = self.next_id;
         self.next_id += 1;
-        let rightmost = self.roots().into_iter().filter_map(|root| {
+        let roots=self.roots();
+        let rightmost = roots.iter().copied().filter_map(|root| {
             self.node(root).map(|n| n.offset.x)
         }).fold(0.0_f32, f32::max);
         self.nodes.push(Node {
             id, parent: None, side: None, title: title.into(),
-            offset: Offset { x: rightmost + 1040.0, y: 0.0 },
+            offset: Offset { x: if roots.is_empty(){0.0}else{rightmost+1040.0}, y: 0.0 },
             color: None, collapsed: false,
         });
         id
@@ -256,6 +265,7 @@ impl Document {
             id, text: String::new(), position: Offset { x, y },
             width: default_text_width(), height: default_text_height(),
             fill_color: None, fill_transparent: true, border_color: None, border_none: true,
+            text_horizontal: TextHorizontal::Left, text_vertical: TextVertical::Top,
         });
         id
     }
@@ -276,6 +286,7 @@ impl Document {
     /// AI-ready pure tree: titles and child ordering only. No layout, IDs,
     /// colors, collapse state or group metadata. Text boxes are excluded because
     /// they have no parent-child relationship.
+    #[allow(dead_code)]
     pub fn pure_tree_json(&self, root: Option<NodeId>) -> Result<String, serde_json::Error> {
         #[derive(Serialize)]
         struct Branch<'a> {
@@ -489,7 +500,7 @@ impl Document {
     }
 
     pub fn delete_subtree(&mut self, id: NodeId) -> bool {
-        if self.node(id).is_none() || id == ROOT || (self.parent(id).is_none() && self.roots().len() <= 1) {
+        if self.node(id).is_none() {
             return false;
         }
         let mut removed = HashSet::from([id]);
@@ -573,7 +584,10 @@ impl Document {
         let z = self.shapes.iter().map(|s| s.z).max().unwrap_or(-1).saturating_add(1);
         let (width, height) = match kind {
             ShapeKind::Text=>(260.0,90.0),
-            ShapeKind::StickyNote=>(240.0,160.0),
+            ShapeKind::StickyNote=>{
+                let grid = FrameGrid::default();
+                (grid.cell_width, grid.cell_height)
+            },
             ShapeKind::Frame=>(360.0,240.0),
             _=>(180.0,100.0),
         };
@@ -737,7 +751,7 @@ impl Document {
     }
     pub fn validate(&self) -> Result<(), String> {
         if self.version != 1 && self.version != 2 { return Err("未対応のJSONFileバージョンです".into()); }
-        if self.nodes.is_empty() || self.nodes.len() + self.text_boxes.len() + self.shapes.len() + self.lines.len()> 10_000 { return Err("Node数が不正です".into()); }
+        if self.nodes.len() + self.text_boxes.len() + self.shapes.len() + self.lines.len()> 10_000 { return Err("Node数が不正です".into()); }
         let ids: HashSet<_> = self.nodes.iter().map(|node| node.id).collect();
         if ids.len() != self.nodes.len() { return Err("NodeIDが重複しています".into()); }
         let box_ids: HashSet<_> = self.text_boxes.iter().map(|box_| box_.id).collect();
@@ -751,8 +765,7 @@ impl Document {
                 return Err("Textボックスのサイズか座標が不正です".into());
             }
         }
-        if self.node(ROOT).is_none() || self.parent(ROOT).is_some() { return Err("ルートNodeが不正です".into()); }
-        if self.roots().is_empty() { return Err("マップがありません".into()); }
+        if self.node(ROOT).is_some_and(|root|root.parent.is_some()) { return Err("ルートNodeが不正です".into()); }
         for node in &self.nodes {
             if node.parent.is_some_and(|p| !ids.contains(&p)) {
                 return Err(format!("親が不明なNode: {}", node.id));

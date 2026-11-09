@@ -40,17 +40,15 @@ impl MindmapApp {
         }
         if self.editing.is_some() { self.finish_edit(true); }
         let ids = self.selection_roots();
-        let targets: Vec<_> = ids.into_iter().filter(|id| {
-            *id != ROOT && (self.doc.parent(*id).is_some() || self.doc.roots().len() > 1)
-        }).collect();
+        let targets: Vec<_> = ids.into_iter().filter(|id|self.doc.node(*id).is_some()).collect();
         if targets.is_empty() { return; }
         self.checkpoint();
         let next = targets.iter().find_map(|id| self.doc.parent(*id))
             .unwrap_or_else(|| self.doc.roots().into_iter().find(|id| !targets.contains(id)).unwrap_or(ROOT));
         for id in targets { self.doc.delete_subtree(id); }
-        self.selected = if self.doc.node(next).is_some() { next } else { self.doc.roots()[0] };
-        self.selection = HashSet::from([self.selected]);
-        self.canvas_selection=HashSet::from([CanvasTarget::Node(self.selected)]);
+        self.selected = if self.doc.node(next).is_some() { next } else { self.doc.roots().first().copied().unwrap_or(ROOT) };
+        self.selection.clear(); self.canvas_selection.clear();
+        if self.doc.node(self.selected).is_some() {self.selection.insert(self.selected);self.canvas_selection.insert(CanvasTarget::Node(self.selected));}
     }
     pub(super) fn undo(&mut self) {
         self.finish_edit(true);

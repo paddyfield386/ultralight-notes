@@ -6,6 +6,17 @@ mod v04_app_tests {
     use super::*;
 
     #[test]
+    fn deleting_initial_map_preserves_other_maps_and_can_create_on_empty_board(){
+        let mut app=MindmapApp::new(Instant::now(),None,false);
+        let other=app.doc.add_map("independent");
+        app.select(ROOT);app.delete_selected();
+        assert!(app.doc.node(ROOT).is_none());assert_eq!(app.doc.node(other).unwrap().title,"independent");
+        app.select(other);app.delete_selected();assert!(app.doc.nodes.is_empty());
+        assert_eq!(app.doc.validate(),Ok(()));
+        let new_map=app.doc.add_map("new");assert_eq!(app.doc.node(new_map).unwrap().offset.x,0.0);
+    }
+
+    #[test]
     fn editor_keeps_positions_and_card_width_static_until_commit() {
         let mut app = MindmapApp::new(Instant::now(), None, false);
         let id = app.doc.children(ROOT)[0];

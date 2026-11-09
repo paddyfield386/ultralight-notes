@@ -30,10 +30,11 @@ enum Drag {
     Marquee { start: Pos2, current: Pos2, additive: bool },
     Node(NodeId),
     TextBox(u64),
-    ResizeTextBox(u64),
+    ResizeTextBox(u64, ResizeEdge),
     Shape(u64),
     ResizeShape(u64, ResizeEdge),
     CreateShape {kind:ShapeKind,start:Pos2,current:Pos2},
+    CreateTextBox {start:Pos2,current:Pos2},
     CreateLine {start:Pos2,current:Pos2},
     Line(u64), // ID retained for future per-line drag semantics
     LineEndpoint(u64,bool),
@@ -43,12 +44,12 @@ enum Drag {
     ConnectorLabel(u64),
 }
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum ResizeEdge { TopLeft, Top, TopRight, Right, BottomRight, Bottom, BottomLeft, Left }
+enum ResizeEdge { Top, Right, Bottom, Left }
 impl ResizeEdge {
-    fn left(self)->bool {matches!(self,Self::Left|Self::TopLeft|Self::BottomLeft)}
-    fn right(self)->bool {matches!(self,Self::Right|Self::TopRight|Self::BottomRight)}
-    fn top(self)->bool {matches!(self,Self::Top|Self::TopLeft|Self::TopRight)}
-    fn bottom(self)->bool {matches!(self,Self::Bottom|Self::BottomLeft|Self::BottomRight)}
+    fn left(self)->bool {matches!(self,Self::Left)}
+    fn right(self)->bool {matches!(self,Self::Right)}
+    fn top(self)->bool {matches!(self,Self::Top)}
+    fn bottom(self)->bool {matches!(self,Self::Bottom)}
 }
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum DropIntent { Child(NodeId), Before(NodeId), After(NodeId) }
@@ -175,6 +176,7 @@ struct MindmapApp {
     connector_edit_text: String,
     connector_edit_focus_pending: bool,
     insert_connector_route: ConnectorRoute,
+    insert_connector_arrow: bool,
     context_connector_point: Offset,
     snap_guides: Vec<(Pos2,Pos2)>,
     context_shape: Option<u64>,
@@ -199,6 +201,7 @@ struct MindmapApp {
     pan: Vec2,
     zoom: f32,
     dragging: Option<Drag>,
+    smart_snap_delta: Vec2,
     drop_intent: Option<DropIntent>,
     middle_pan: bool,
     suppress_canvas_context_once: bool,
@@ -278,15 +281,19 @@ impl MindmapApp {
             .unwrap_or_default();
         let recent_files = preferences.recent_files.into_iter()
             .filter(|path| path.is_file()).take(12).collect();
+        #[cfg(not(test))]
+        let initial_doc=if sample_100 { Document::sample_100() } else { Document::blank() };
+        #[cfg(test)]
+        let initial_doc=if sample_100 { Document::sample_100() } else { Document::sample_design() };
         Self {
-            doc: if sample_100 { Document::sample_100() } else { Document::sample_design() },
+            doc: initial_doc,
             selected: ROOT, selection: HashSet::from([ROOT]), drag_moving: Vec::new(),
             canvas_selection: HashSet::from([CanvasTarget::Node(ROOT)]),
             selected_shape: None, selected_line:None, context_line:None,
             insert_line_mode:false,shape_edit_focus_pending:false,
             arrange_columns:4, selected_connector:None, selected_connectors:HashSet::new(),
             editing_connector:None,connector_edit_text:String::new(),connector_edit_focus_pending:false,
-            insert_connector_route:ConnectorRoute::Orthogonal,context_connector_point:Offset::default(),
+             insert_connector_route:ConnectorRoute::Orthogonal,insert_connector_arrow:false,context_connector_point:Offset::default(),
             snap_guides:Vec::new(),context_shape:None,context_connector:None,
             insert_shape_mode: None, insert_connector_mode: false, editing_shape: None,
             shape_edit_text: String::new(), snap_to_grid: preferences.snap_to_grid,
@@ -295,7 +302,7 @@ impl MindmapApp {
             ask_discard: false, pending_action: None, exit_approved: false, grid_settings_open: false,
             dirty: false, status: String::new(), pan: Vec2::ZERO,
             zoom: if sample_100 { 0.78 } else { 0.92 },
-            dragging: None, drop_intent: None, middle_pan: false, suppress_canvas_context_once: false, context_target: None,
+            dragging: None, smart_snap_delta:Vec2::ZERO, drop_intent: None, middle_pan: false, suppress_canvas_context_once: false, context_target: None,
             context_text_box: None, context_link: None, selected_link: None,
             link_origin: None, search_open: false, search_query: String::new(),
             search_index: 0, search_focus_pending: false,
@@ -366,7 +373,7 @@ impl eframe::App for MindmapApp {
             });
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(if self.dark { Color32::from_rgb(24, 29, 41) } else { BG }))
-            .show(ui, |ui| self.canvas(ui));
+            .show(ui, |ui| {self.canvas(ui);});
         self.dialogs(&ctx);
         static FIRST_PAINT: std::sync::Once = std::sync::Once::new();
         FIRST_PAINT.call_once(|| diagnostic_mark("first canvas frame completed"));

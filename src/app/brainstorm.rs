@@ -127,7 +127,7 @@ impl MindmapApp {
         let kind=shape.kind;
         let fill=shape.style.fill.map(color_from_rgb).unwrap_or(if self.dark {Color32::from_rgb(34,40,54)}else{Color32::WHITE});
         let fg=color_from_rgb(shape.style.text);
-        let area=if kind==ShapeKind::Frame {Rect::from_min_size(bounds.min,egui::vec2(bounds.width(),(38.0*self.zoom).max(26.0)))}
+        let area=if kind==ShapeKind::Frame {self.frame_header_screen_rect(id,origin).unwrap_or(bounds)}
                  else {bounds};
         // A sticky's edited and committed text must have identical origin,
         // wrap width and font. The sticker already paints its own background;
@@ -145,13 +145,14 @@ impl MindmapApp {
             (TextHorizontal::Right,TextVertical::Bottom)=>Align2::RIGHT_BOTTOM,
         };
         let content=if sticky {area.shrink(12.0*self.zoom)} else {area};
-        let margin=if sticky {0} else {(12.0*self.zoom).round().clamp(5.0,30.0) as i8};
+        let margin=if sticky {0} else if kind==ShapeKind::Frame {(12.0*self.zoom).round().clamp(5.0,30.0) as i8}
+            else {(12.0*self.zoom).round().clamp(5.0,30.0) as i8};
         let edit=egui::TextEdit::multiline(&mut self.shape_edit_text)
             .id_salt(("inline-canvas-shape",id))
             .font(FontId::proportional(if sticky {16.0*self.zoom}else{shape.style.text_size*self.zoom}))
             .text_color(fg)
-            .align(if sticky || kind==ShapeKind::Frame {Align2::LEFT_TOP}else{custom_align})
-            .margin(egui::Margin::symmetric(margin,margin))
+            .align(if kind==ShapeKind::Frame {Align2::LEFT_CENTER}else{custom_align})
+            .margin(if kind==ShapeKind::Frame {egui::Margin::symmetric(margin,0)} else {egui::Margin::symmetric(margin,margin)})
             .desired_width((content.width()-2.0*f32::from(margin)).max(20.0))
             .desired_rows(((content.height()/(20.0*self.zoom)).floor() as usize).max(1))
             .frame(egui::Frame::new().fill(if sticky {Color32::TRANSPARENT}else{fill})
@@ -363,14 +364,14 @@ impl MindmapApp {
         button.on_hover_text(explanation).clicked()
     }
     pub(super) fn arrangement_menu(&mut self,ui:&mut egui::Ui) {
-        ui.label("Align");
+        ui.label(self.language.text("Align", "整列"));
         ui.horizontal(|ui|{
-            for (label,mode) in [("Left",Arrangement::Left),("Center",Arrangement::CenterX),("Right",Arrangement::Right)] {
+            for (label,mode) in [(self.language.text("Left", "左"),Arrangement::Left),(self.language.text("Center", "中央"),Arrangement::CenterX),(self.language.text("Right", "右"),Arrangement::Right)] {
                 if Self::arrangement_icon(ui,label,mode){self.arrange_selected(mode);ui.close();}
             }
         });
         ui.horizontal(|ui|{
-            for (label,mode) in [("Top",Arrangement::Top),("Center",Arrangement::CenterY),("Bottom",Arrangement::Bottom)] {
+            for (label,mode) in [(self.language.text("Top", "上"),Arrangement::Top),(self.language.text("Center", "中央"),Arrangement::CenterY),(self.language.text("Bottom", "下"),Arrangement::Bottom)] {
                 if Self::arrangement_icon(ui,label,mode){self.arrange_selected(mode);ui.close();}
             }
         });

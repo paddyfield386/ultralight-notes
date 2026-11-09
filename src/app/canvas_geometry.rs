@@ -152,8 +152,14 @@ impl MindmapApp {
         self.doc.text_boxes.iter().rev().find(|b| self.text_box_screen_rect(b.id, origin)
             .is_some_and(|rect| rect.contains(point))).map(|b| b.id)
     }
-    pub(super) fn text_box_resize_handle(&self, id: u64, origin: Pos2) -> Option<Rect> {
+    pub(super) fn text_box_resize_handles(&self, id: u64, origin: Pos2) -> Option<Vec<(ResizeEdge, Rect)>> {
         let r = self.text_box_screen_rect(id, origin)?;
-        Some(Rect::from_center_size(r.right_bottom() - egui::vec2(3.0, 3.0), egui::vec2(16.0, 16.0)))
+        Some([
+            (ResizeEdge::Top, r.center_top()),
+            (ResizeEdge::Right, r.right_center()),
+            (ResizeEdge::Bottom, r.center_bottom()),
+            (ResizeEdge::Left, r.left_center()),
+        ].into_iter().map(|(edge, center)|
+            (edge, Rect::from_center_size(center, egui::vec2(18.0, 18.0)))).collect())
     }
 }

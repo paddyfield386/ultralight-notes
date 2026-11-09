@@ -340,7 +340,7 @@ pub(super) fn render_svg(doc: &Document) -> Result<Artwork, String> {
 
 /// Returns PNG bytes and *unpremultiplied* RGBA pixel data for Windows clipboard.
 /// A white canvas makes every pixel opaque, so resvg's premultiplied RGBA is identical.
-fn render_png(doc: &Document) -> Result<(Vec<u8>, Vec<u8>, usize, usize), String> {
+pub(super) fn render_png(doc: &Document) -> Result<(Vec<u8>, Vec<u8>, usize, usize), String> {
     let artwork = render_svg(doc)?;
     // Export at 2x when possible while capping the memory footprint.
     let scale = (8192.0_f32 / artwork.width.max(artwork.height)).min(2.0);

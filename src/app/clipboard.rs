@@ -15,8 +15,9 @@ struct CanvasCopyPayload {
     #[serde(default)]
     lines: Vec<CanvasLine>,
     connectors: Vec<CanvasConnector>,
+    #[serde(default)]
+    links: Vec<NodeLink>,
 }
-
 
 impl MindmapApp {
     /// Ctrl+D duplicates canvas objects in one undo step, retaining only
@@ -36,13 +37,27 @@ impl MindmapApp {
         let shapes=self.doc.shapes.iter().filter(|b|selected.contains(&CanvasTarget::Shape(b.id))).cloned().collect();
         let lines=self.doc.lines.iter().filter(|l|selected.contains(&CanvasTarget::Line(l.id))).cloned().collect();
         let connectors=self.doc.connectors.iter().filter(|c|selected.contains(&c.from.target)&&selected.contains(&c.to.target)).cloned().collect();
-        self.paste_canvas_payload(CanvasCopyPayload{marker:true,nodes,text_boxes,shapes,lines,connectors});
+        let links=self.doc.links.iter().filter(|l|selected.contains(&CanvasTarget::Node(l.from))&&selected.contains(&CanvasTarget::Node(l.to))).copied().collect();
+        self.paste_canvas_payload(CanvasCopyPayload{marker:true,nodes,text_boxes,shapes,lines,connectors,links});
     }
     pub(super) fn pure_json_to_clipboard(&mut self, ctx: &egui::Context, selected_branch: bool) {
         self.finish_edit(true);
         self.finish_text_box_edit(true);
-        let root = if selected_branch && self.selected_text_box.is_none() { Some(self.selected) } else { None };
-        match self.doc.pure_tree_json(root) {
+        let mut export=self.doc.clone();
+        if selected_branch {
+            let targets=self.canvas_selection.clone();
+            let node_ids:HashSet<_>=targets.iter().filter_map(|t|match t{CanvasTarget::Node(id)=>Some(*id),_=>None}).collect();
+            export.nodes.retain(|n|node_ids.contains(&n.id));
+            for n in &mut export.nodes {if n.parent.is_none() || !node_ids.contains(&n.parent.unwrap_or(0)){n.parent=None;}}
+            export.shapes.retain(|s|targets.contains(&CanvasTarget::Shape(s.id)));
+            export.text_boxes.retain(|b|targets.contains(&CanvasTarget::TextBox(b.id)));
+            export.lines.retain(|l|targets.contains(&CanvasTarget::Line(l.id)));
+            let valid:HashSet<_>=targets;
+            export.connectors.retain(|c|valid.contains(&c.from.target)&&valid.contains(&c.to.target));
+            export.links.retain(|l|node_ids.contains(&l.from)&&node_ids.contains(&l.to));
+            export.canvas_groups.retain_mut(|g|{g.members.retain(|m|valid.contains(m));g.members.len()>1});
+        }
+        match serde_json::to_string_pretty(&export) {
             Ok(text) => {
                 ctx.copy_text(text);
                 self.status.clear();
@@ -51,9 +66,17 @@ impl MindmapApp {
         }
     }
     fn copy_canvas_payload(&mut self, ctx:&egui::Context, with_descendants:bool) -> bool {
-        let any_non_node = self.canvas_selection.iter().any(|x| !matches!(x,CanvasTarget::Node(_)));
-        if !any_non_node {return false;}
+        if self.canvas_selection.is_empty() {return false;}
         let mut targets=self.canvas_selection.clone();
+        // A frame owns its members. Copy the whole contents so its membership
+        // and grid references can be mapped into the destination document.
+        loop {
+            let before=targets.len();
+            for shape in &self.doc.shapes {
+                if targets.contains(&CanvasTarget::Shape(shape.id)) {targets.extend(shape.members.iter().copied());}
+            }
+            if targets.len()==before {break;}
+        }
         if with_descendants {
             for id in self.selection_in_doc_order() {
                 let mut todo=vec![id];
@@ -68,7 +91,8 @@ impl MindmapApp {
         let shapes=self.doc.shapes.iter().filter(|b|targets.contains(&CanvasTarget::Shape(b.id))).cloned().collect();
         let lines=self.doc.lines.iter().filter(|l|targets.contains(&CanvasTarget::Line(l.id))).cloned().collect();
         let connectors=self.doc.connectors.iter().filter(|c|targets.contains(&c.from.target)&&targets.contains(&c.to.target)).cloned().collect();
-        let payload=CanvasCopyPayload {marker:true,nodes,text_boxes,shapes,lines,connectors};
+        let links=self.doc.links.iter().filter(|l|targets.contains(&CanvasTarget::Node(l.from))&&targets.contains(&CanvasTarget::Node(l.to))).copied().collect();
+        let payload=CanvasCopyPayload {marker:true,nodes,text_boxes,shapes,lines,connectors,links};
         if let Ok(text)=serde_json::to_string_pretty(&payload) {ctx.copy_text(text);return true;}
         false
     }
@@ -87,13 +111,12 @@ impl MindmapApp {
         }
         // Parent links inside the payload are remapped, external parents attach
         // to the current selection instead (never leave dangling IDs).
-        let fallback_parent=if self.doc.node(self.selected).is_some() {self.selected}else{ROOT};
+        let fallback_parent=self.doc.node(self.selected).map(|n|n.id);
         for (_,mut node) in new_nodes {
             node.parent=node.parent.and_then(|old| match remap.get(&CanvasTarget::Node(old)) {
-                Some(CanvasTarget::Node(mapped))=>Some(*mapped),_=>Some(fallback_parent)
+                Some(CanvasTarget::Node(mapped))=>Some(*mapped),_=>fallback_parent
             });
-            // The copied root must not replace the document's primary root.
-            if node.parent.is_none(){node.parent=Some(fallback_parent);}
+            if node.parent.is_none(){node.parent=fallback_parent;}
             self.doc.nodes.push(node);
         }
         for mut b in payload.text_boxes {
@@ -136,8 +159,14 @@ impl MindmapApp {
                 self.doc.connectors.push(c);
             }
         }
+        for link in payload.links {
+            if let (Some(CanvasTarget::Node(from)),Some(CanvasTarget::Node(to)))=(remap.get(&CanvasTarget::Node(link.from)),remap.get(&CanvasTarget::Node(link.to))) {
+                self.doc.add_link(*from,*to);
+            }
+        }
         self.canvas_selection=remap.values().copied().collect();
         self.selection=self.canvas_selection.iter().filter_map(|t|match t{CanvasTarget::Node(id)=>Some(*id),_=>None}).collect();
+        if let Some(id)=self.doc.nodes.iter().find(|n|self.selection.contains(&n.id)).map(|n|n.id){self.selected=id;}
         self.selected_shape=self.canvas_selection.iter().find_map(|t|match t{CanvasTarget::Shape(id)=>Some(*id),_=>None});
     }
     pub(super) fn copy_selected(&mut self, ctx: &egui::Context, with_descendants: bool) {

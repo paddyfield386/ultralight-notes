@@ -23,12 +23,17 @@ impl MindmapApp {
         self.text_box_is_new = false;
         self.text_box_focus_pending = false;
     }
-    pub(super) fn insert_text_box_at(&mut self, point: Pos2, origin: Pos2) {
+    pub(super) fn insert_text_box_dragged(&mut self, start: Pos2, end: Pos2, origin: Pos2) {
         self.finish_edit(true);
         self.finish_text_box_edit(true);
         self.checkpoint();
-        let relative = (point - origin) / self.zoom;
+        let rect = egui::Rect::from_two_pos(start, end);
+        let relative = (rect.min - origin) / self.zoom;
         let id = self.doc.add_text_box(relative.x, relative.y);
+        if let Some(box_) = self.doc.text_box_mut(id) {
+            box_.width = (rect.width() / self.zoom).max(120.0);
+            box_.height = (rect.height() / self.zoom).max(50.0);
+        }
         self.insert_text_box_mode = false;
         self.start_text_box_edit(id, true);
     }

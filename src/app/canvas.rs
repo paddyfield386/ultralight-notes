@@ -1,6 +1,35 @@
 //! Canvas rendering and drag/pan/zoom interactions.
 use super::*;
 
+#[cfg(test)]
+mod smart_guide_input_tests {
+    use super::*;
+    #[test]
+    fn gradual_drag_can_escape_a_smart_guide(){
+        let mut app=MindmapApp::new(Instant::now(),None,false);
+        app.doc.nodes.clear();app.selection.clear();app.canvas_selection.clear();app.zoom=1.0;app.snap_to_grid=false;
+        let moving=app.doc.add_shape(ShapeKind::Rectangle,Offset{x:100.0,y:-120.0});
+        app.doc.add_shape(ShapeKind::Rectangle,Offset{x:150.0,y:100.0});
+        app.select_shape(moving,false);
+        let ctx=egui::Context::default();
+        let mut start=Pos2::ZERO;
+        let mut run=|app:&mut MindmapApp,events:Vec<egui::Event>|{
+            let input=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(900.0,700.0))),events,..Default::default()};
+            let output=ctx.run_ui(input,|ui|{
+                let rect=ui.available_rect_before_wrap();let origin=Pos2::new(rect.left()+152.0,rect.center().y);
+                if start==Pos2::ZERO {start=app.shape_screen_rect(moving,origin).unwrap().center();}
+                app.canvas(ui);
+            });output.drop_without_applying_deltas();
+            start
+        };
+        let start=run(&mut app,vec![]);
+        run(&mut app,vec![egui::Event::PointerMoved(start),egui::Event::PointerButton{pos:start,button:PointerButton::Primary,pressed:true,modifiers:egui::Modifiers::NONE}]);
+        for x in 1..=70 {run(&mut app,vec![egui::Event::PointerMoved(start+egui::vec2(x as f32,0.0))]);}
+        let x=app.doc.shape(moving).unwrap().position.x;
+        assert!(x>160.0,"shape remained stuck at x={x}");
+    }
+}
+
 impl MindmapApp {
     pub(super) fn canvas(&mut self, ui: &mut egui::Ui) {
         let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
@@ -105,9 +134,20 @@ impl MindmapApp {
                 else if p.distance_sq(b) < 100.0 {Some((id,false))} else {None}
             })
         }));
-        let resize_hover = hover.and_then(|p| self.selected_text_box.filter(|id| {
-            self.text_box_resize_handle(*id, origin).is_some_and(|rect| rect.contains(p))
-        }));
+        let resize_hover = hover.and_then(|p| self.selected_text_box.and_then(|id|
+            self.text_box_resize_handles(id, origin)?.into_iter()
+                .find_map(|(edge, rect)| rect.contains(p).then_some((id, edge)))));
+        // Once a drag crosses into the object, the current pointer is no
+        // longer over the small handle. Preserve the press-origin hit so
+        // inward resizes remain reliable.
+        let press_resize = ctx.input(|i| i.pointer.press_origin()).and_then(|p| {
+            if let Some(id) = self.selected_shape {
+                self.resize_handle_at(id, origin, p).map(|edge| (id, edge))
+            } else if let Some(id) = self.selected_text_box {
+                self.text_box_resize_handles(id, origin)?.into_iter()
+                    .find_map(|(edge, rect)| rect.contains(p).then_some((id, edge)))
+            } else { None }
+        });
         let modifiers = ctx.input(|i| i.modifiers);
         if response.clicked_by(PointerButton::Primary) && !self.middle_pan {
             if hovered_connector.is_none() && !modifiers.shift && !modifiers.command {
@@ -119,15 +159,16 @@ impl MindmapApp {
                 } else {
                     self.status = "Link creation cancelled".into();
                 }
-            } else if let Some(kind) = self.insert_shape_mode {
-                // Click creates default size; drag creates a rectangle matching the gesture.
-                if let Some(pointer) = hover {
-                    self.add_shape_at(kind,pointer,origin);
-                }
+            } else if self.insert_shape_mode == Some(ShapeKind::StickyNote) && hovered_shape.is_none() && hovered_text_box.is_none()
+                && shape_resize_hover.is_none() && resize_hover.is_none() {
+                if let Some(pointer) = hover { self.add_shape_at(ShapeKind::StickyNote, pointer, origin); }
+            } else if self.insert_shape_mode.is_some() && hovered_shape.is_none() && hovered_text_box.is_none()
+                && shape_resize_hover.is_none() && resize_hover.is_none() {
+                // Shapes are created on drag release, never on a click.
             } else if self.insert_line_mode {
                 // A free line requires a nonzero-length drag.
-            } else if self.insert_text_box_mode {
-                if let Some(pointer) = hover { self.insert_text_box_at(pointer, origin); }
+            } else if self.insert_text_box_mode && hovered_shape.is_none() && hovered_text_box.is_none() {
+                // Text boxes are created on drag release, never on a click.
             } else if let Some(id) = hovered_connector {
                 if modifiers.shift||modifiers.command {
                     if !self.selected_connectors.insert(id){self.selected_connectors.remove(&id);}
@@ -180,9 +221,22 @@ impl MindmapApp {
             .filter(|p|bounds.contains(*p))
             .and_then(|p|self.find_anchor(p,&positions,origin));
         if response.drag_started_by(PointerButton::Primary) && !self.middle_pan {
-            self.dragging = Some(if let Some(kind)=self.insert_shape_mode {
+            self.smart_snap_delta=Vec2::ZERO;
+            // A press on an existing object cancels insertion mode so the
+            // same gesture selects, resizes, or moves that object instead.
+            if self.insert_shape_mode.is_some() &&
+                (hovered_shape.is_some() || shape_resize_hover.is_some() || hovered_text_box.is_some() || resize_hover.is_some()) {
+                self.insert_shape_mode = None;
+            }
+            if self.insert_text_box_mode && (hovered_shape.is_some() || hovered_text_box.is_some()) {
+                self.insert_text_box_mode = false;
+            }
+            self.dragging = Some(if let Some(kind)=self.insert_shape_mode.filter(|kind| *kind != ShapeKind::StickyNote) {
                 let pointer=ctx.input(|i|i.pointer.interact_pos()).unwrap_or(bounds.center());
                 Drag::CreateShape{kind,start:pointer,current:pointer}
+            } else if self.insert_text_box_mode {
+                let pointer=ctx.input(|i|i.pointer.interact_pos()).unwrap_or(bounds.center());
+                Drag::CreateTextBox{start:pointer,current:pointer}
             } else if self.insert_line_mode {
                 let pointer=ctx.input(|i|i.pointer.interact_pos()).unwrap_or(bounds.center());
                 Drag::CreateLine{start:pointer,current:pointer}
@@ -192,14 +246,15 @@ impl MindmapApp {
                 self.checkpoint();Drag::ConnectorLabel(id)
             } else if let Some((id,is_start))=line_endpoint_hover {
                 self.checkpoint();Drag::LineEndpoint(id,is_start)
+            } else if let Some((id,edge)) = press_resize.or(shape_resize_hover) {
+                // Selected-shape sides are square resize handles, not ports.
+                self.shape_resize_aspect=self.doc.shape(id).map(|s|s.width/s.height.max(1.0));
+                self.checkpoint();
+                Drag::ResizeShape(id,edge)
             } else if let Some(from) = pressed_anchor.or(anchor_hover) {
                 Drag::Connector(from)
             } else if let Some((id,is_from)) = endpoint_hover {
                 Drag::RetargetConnector(id,is_from)
-            } else if let Some((id,edge)) = shape_resize_hover {
-                self.shape_resize_aspect=self.doc.shape(id).map(|s|s.width/s.height.max(1.0));
-                self.checkpoint();
-                Drag::ResizeShape(id,edge)
             } else if let Some(id)=hovered_line {
                 if !self.canvas_selection.contains(&CanvasTarget::Line(id)) {self.select_line(id,modifiers.shift||modifiers.command);}
                 self.checkpoint();
@@ -211,10 +266,10 @@ impl MindmapApp {
                 self.drag_moving = self.selection_roots();
                 self.checkpoint();
                 Drag::Shape(id)
-            } else if let Some(id) = resize_hover {
+            } else if let Some((id, edge)) = press_resize.or(resize_hover) {
                 self.finish_text_box_edit(true);
                 self.checkpoint();
-                Drag::ResizeTextBox(id)
+                Drag::ResizeTextBox(id, edge)
             } else if let Some(id) = hovered_text_box {
                 self.select_text_box(id);
                 self.checkpoint();
@@ -234,6 +289,10 @@ impl MindmapApp {
                 Some(Drag::CreateShape{kind,start,..})=>{
                     let pointer=ctx.input(|i|i.pointer.interact_pos()).unwrap_or(start);
                     self.dragging=Some(Drag::CreateShape{kind,start,current:pointer});
+                }
+                Some(Drag::CreateTextBox{start,..})=>{
+                    let pointer=ctx.input(|i|i.pointer.interact_pos()).unwrap_or(start);
+                    self.dragging=Some(Drag::CreateTextBox{start,current:pointer});
                 }
                 Some(Drag::CreateLine{start,..})=>{
                     let pointer=ctx.input(|i|i.pointer.interact_pos()).unwrap_or(start);
@@ -256,22 +315,37 @@ impl MindmapApp {
                     self.dragging = Some(Drag::Marquee { start, current: pointer, additive });
                 }
                 Some(Drag::Node(_)) => {
+                    let delta=delta-self.smart_snap_delta;self.smart_snap_delta=Vec2::ZERO;
                     let ids = self.drag_moving.clone();
-                    for id in ids {
-                        if let Some(n) = self.doc.node_mut(id) {
+                    for id in &ids {
+                        if let Some(n) = self.doc.node_mut(*id) {
                             n.offset.x += delta.x / self.zoom;
                             n.offset.y += delta.y / self.zoom;
                         }
                     }
                     self.move_canvas_selection(delta);
+                    if let Some(id)=ids.first().copied().filter(|_|!modifiers.alt) {
+                        let (snap,guides)=self.node_alignment_guides(id,origin);
+                        if snap.length_sq()>0.0 {
+                            for moved in &ids {if let Some(n)=self.doc.node_mut(*moved){n.offset.x+=snap.x/self.zoom;n.offset.y+=snap.y/self.zoom;}}
+                            self.move_canvas_selection(snap);
+                            self.smart_snap_delta=snap;
+                        }
+                        self.snap_guides=guides;
+                    }
                 }
-                Some(Drag::Shape(_)) => {
+                Some(Drag::Shape(id)) => {
+                    let delta=delta-self.smart_snap_delta;self.smart_snap_delta=Vec2::ZERO;
                     self.move_canvas_selection(delta);
                     for id in self.drag_moving.clone() {
                         if let Some(n) = self.doc.node_mut(id) {
                             n.offset.x += delta.x/self.zoom;
                             n.offset.y += delta.y/self.zoom;
                         }
+                    }
+                    if !modifiers.alt {
+                        self.smart_snap_delta=self.apply_alignment_snap(id,origin);
+                        for moved in &self.drag_moving {if let Some(n)=self.doc.node_mut(*moved){n.offset.x+=self.smart_snap_delta.x/self.zoom;n.offset.y+=self.smart_snap_delta.y/self.zoom;}}
                     }
                 }
                 Some(Drag::ResizeShape(id,edge)) => {
@@ -289,15 +363,35 @@ impl MindmapApp {
                 }
                 Some(Drag::Connector(_)) | Some(Drag::RetargetConnector(..)) => {}
                 Some(Drag::TextBox(id)) => {
+                    let delta=delta-self.smart_snap_delta;self.smart_snap_delta=Vec2::ZERO;
                     if let Some(box_) = self.doc.text_box_mut(id) {
                         box_.position.x += delta.x / self.zoom;
                         box_.position.y += delta.y / self.zoom;
                     }
+                    if !modifiers.alt {
+                        let (snap,_)=self.object_alignment_guides(CanvasTarget::TextBox(id),origin);
+                        if let Some(box_)=self.doc.text_box_mut(id){box_.position.x+=snap.x;box_.position.y+=snap.y;}
+                        self.smart_snap_delta=snap*self.zoom;
+                    }
                 }
-                Some(Drag::ResizeTextBox(id)) => {
+                Some(Drag::ResizeTextBox(id, edge)) => {
                     if let Some(box_) = self.doc.text_box_mut(id) {
-                        box_.width = (box_.width + delta.x / self.zoom).clamp(120.0, 2500.0);
-                        box_.height = (box_.height + delta.y / self.zoom).clamp(50.0, 2500.0);
+                        let dx = delta.x / self.zoom;
+                        let dy = delta.y / self.zoom;
+                        if edge.left() {
+                            let next = (box_.width - dx).clamp(120.0, 2500.0);
+                            box_.position.x += box_.width - next;
+                            box_.width = next;
+                        } else if edge.right() {
+                            box_.width = (box_.width + dx).clamp(120.0, 2500.0);
+                        }
+                        if edge.top() {
+                            let next = (box_.height - dy).clamp(50.0, 2500.0);
+                            box_.position.y += box_.height - next;
+                            box_.height = next;
+                        } else if edge.bottom() {
+                            box_.height = (box_.height + dy).clamp(50.0, 2500.0);
+                        }
                     }
                 }
                 None => {}
@@ -306,9 +400,17 @@ impl MindmapApp {
             ctx.request_repaint();
         }
         if response.drag_stopped_by(PointerButton::Primary) {
+            self.smart_snap_delta=Vec2::ZERO;
             match self.dragging {
                 Some(Drag::CreateShape{kind,start,current})=>{
-                    self.add_dragged_shape(kind,start,current,origin);
+                    if current.distance_sq(start)>16.0 {
+                        self.add_dragged_shape(kind,start,current,origin);
+                    }
+                }
+                Some(Drag::CreateTextBox{start,current})=>{
+                    if current.distance_sq(start)>16.0 {
+                        self.insert_text_box_dragged(start,current,origin);
+                    }
                 }
                 Some(Drag::CreateLine{start,current})=>{
                     if current.distance_sq(start)>16.0 {
@@ -365,13 +467,17 @@ impl MindmapApp {
                         if let Some(to)=self.find_anchor(point,&self.positions(),origin) {
                             if to.target!=from.target {
                                 self.checkpoint();
-                                let corrected_from=if let Some(source_rect)=self.object_screen_rect(from.target,&positions,origin) {
-                                    let dest=self.object_screen_rect(to.target,&positions,origin)
-                                        .map(|r|Self::anchor_position(r,to.anchor)).unwrap_or(point);
-                                    ConnectorEnd{target:from.target,anchor:Self::facing_source_anchor(source_rect,dest)}
-                                }else{from};
-                                self.selected_connector=self.doc.add_connector(corrected_from,to,false);
-                                if let Some(id)=self.selected_connector {if let Some(c)=self.doc.connectors.iter_mut().find(|c|c.id==id){c.route=self.insert_connector_route;}}
+                                // Preserve the exact source port that was dragged;
+                                // never replace it with the geometrically nearest port.
+                                let mut created=false;
+                                if let Some(existing)=self.doc.connectors.iter().find(|c|c.from==from&&c.to==to).map(|c|c.id) {
+                                    // Do not create a second coincident route.
+                                    self.selected_connector=Some(existing);
+                                } else {
+                                    self.selected_connector=self.doc.add_connector(from,to,false);
+                                    created=true;
+                                }
+                                if created { if let Some(id)=self.selected_connector {if let Some(c)=self.doc.connectors.iter_mut().find(|c|c.id==id){c.route=self.insert_connector_route;c.arrow=self.insert_connector_arrow;}} }
                             }
                         }
                     }
@@ -466,6 +572,14 @@ impl MindmapApp {
         self.snap_guides=if !modifiers.alt {
             if let Some(Drag::Shape(id))=self.dragging {
                 self.alignment_guides_for(id,origin).1
+            }else if let Some(Drag::ResizeShape(id,_))=self.dragging {
+                self.alignment_guides_for(id,origin).1
+            }else if let Some(Drag::Node(id))=self.dragging {
+                self.node_alignment_guides(id,origin).1
+            }else if let Some(Drag::TextBox(id))=self.dragging {
+                self.object_alignment_guides(CanvasTarget::TextBox(id),origin).1
+            }else if let Some(Drag::ResizeTextBox(id,_))=self.dragging {
+                self.object_alignment_guides(CanvasTarget::TextBox(id),origin).1
             }else{Vec::new()}
         }else{Vec::new()};
         if self.grid.visible { self.draw_dotted_grid(&painter, bounds, origin); }
@@ -475,20 +589,11 @@ impl MindmapApp {
         if let Some(kind)=self.insert_shape_mode {
             if let Some(Drag::CreateShape{start,current,..})=self.dragging {
                 Self::draw_shape_outline(&painter,Rect::from_two_pos(start,current),kind,Stroke::new(1.8,ACCENT));
-            } else if let Some(point)=hover {
-                let size=match kind {ShapeKind::Text=>(260.0,90.0),ShapeKind::StickyNote=>(240.0,160.0),ShapeKind::Frame=>(360.0,240.0),_=>(180.0,100.0)};
-                Self::draw_shape_outline(&painter,Rect::from_min_size(point,egui::vec2(size.0,size.1)*self.zoom),kind,Stroke::new(1.3,ACCENT));
             }
         }
         if let Some(Drag::CreateLine{start,current})=self.dragging {
             painter.line_segment([start,current],Stroke::new(2.0,ACCENT));
             painter.circle_filled(start,3.5,ACCENT);
-        }
-        if self.insert_text_box_mode {
-            if let Some(pointer) = hover {
-                painter.rect_stroke(Rect::from_min_size(pointer, egui::vec2(300.0, 100.0) * self.zoom),
-                    4.0, Stroke::new(1.0, ACCENT), StrokeKind::Outside);
-            }
         }
         if let Some(Drag::Marquee { start, current, .. }) = self.dragging {
             let rect = Rect::from_two_pos(start, current).intersect(bounds);
@@ -505,7 +610,7 @@ impl MindmapApp {
                 let to=self.find_anchor(pointer,&positions,origin).filter(|end|end.target!=from.target);
                 let end=to.and_then(|target|self.object_screen_rect(target.target,&positions,origin)
                     .map(|r|Self::anchor_position(r,target.anchor))).unwrap_or(pointer);
-                let source=ConnectorEnd{target:from.target,anchor:Self::facing_source_anchor(rect,end)};
+                let source=from;
                 let start=Self::anchor_position(rect,source.anchor);
                 let mut preview=crate::canvas_core::CanvasConnector::new(0,source,
                     to.unwrap_or(ConnectorEnd{target:from.target,anchor:from.anchor}),false);
@@ -518,7 +623,7 @@ impl MindmapApp {
                 }
             }
         }
-        // Paint curves behind the cards.
+        // Paint the hierarchy links as the original smooth mindmap curves.
         for node in &self.doc.nodes {
             let Some(parent) = node.parent else { continue; };
             let (Some(&a), Some(&b)) = (positions.get(&parent), positions.get(&node.id)) else { continue; };
@@ -527,10 +632,10 @@ impl MindmapApp {
             let child_rect = self.screen_rect(node, b, origin);
             let start = parent_rect.right_center();
             let end = child_rect.left_center();
+            let tint = TINTS[self.tint_index(node.id)];
             let bend = ((end.x - start.x) * 0.48).max(24.0);
             let c1 = start + egui::vec2(bend, 0.0);
             let c2 = end - egui::vec2(bend, 0.0);
-            let tint = TINTS[self.tint_index(node.id)];
             painter.add(egui::Shape::CubicBezier(egui::epaint::CubicBezierShape::from_points_stroke(
                 [start, c1, c2, end], false, Color32::TRANSPARENT,
                 Stroke::new((2.1 * self.zoom).max(1.1), tint.line),
@@ -630,26 +735,40 @@ impl MindmapApp {
             if selected {
                 painter.rect_stroke(rect, 5.0,
                     Stroke::new(1.6, ACCENT), StrokeKind::Inside);
-                if let Some(handle) = self.text_box_resize_handle(box_.id, origin) {
-                    painter.rect_filled(handle, 2.0, Color32::WHITE);
-                    painter.rect_stroke(handle, 2.0, Stroke::new(1.5, ACCENT), StrokeKind::Inside);
+                if let Some(handles) = self.text_box_resize_handles(box_.id, origin) {
+                    for (_, handle) in handles {
+                        let hovered = hover.is_some_and(|pointer| handle.contains(pointer));
+                        painter.rect_filled(handle, 2.0, if hovered { ACCENT } else { Color32::WHITE });
+                        painter.rect_stroke(handle, 2.0, Stroke::new(1.5, if hovered { Color32::WHITE } else { ACCENT }), StrokeKind::Inside);
+                    }
                 }
             }
             if self.editing_text_box != Some(box_.id) {
-                let clipped = painter.with_clip_rect(rect.shrink(10.0));
+                let inset = egui::vec2(15.0, 13.0) * self.zoom;
+                let area = Rect::from_min_max(rect.min + inset, rect.max - inset);
+                let clipped = painter.with_clip_rect(area);
                 let text = if box_.text.is_empty() && selected {
                     "Enter text".to_owned()
                 } else { box_.text.clone() };
                 let text_color = if box_.fill_color.is_some() { INK }
                     else if self.dark { Color32::WHITE } else { INK };
                 let galley = clipped.layout(text, FontId::proportional(15.5 * self.zoom),
-                    text_color, (rect.width() - 30.0 * self.zoom).max(20.0));
-                clipped.galley(rect.left_top() + egui::vec2(15.0, 13.0) * self.zoom,
-                    galley, text_color);
+                    text_color, area.width().max(20.0));
+                let x = match box_.text_horizontal {
+                    TextHorizontal::Left => area.left(),
+                    TextHorizontal::Center => area.center().x - galley.size().x * 0.5,
+                    TextHorizontal::Right => area.right() - galley.size().x,
+                };
+                let y = match box_.text_vertical {
+                    TextVertical::Top => area.top(),
+                    TextVertical::Center => area.center().y - galley.size().y * 0.5,
+                    TextVertical::Bottom => area.bottom() - galley.size().y,
+                };
+                clipped.galley(Pos2::new(x, y), galley, text_color);
             }
         }
         // Free shapes are drawn above legacy annotations; hit-testing uses the same priority.
-        self.paint_canvas_shapes(&painter, origin);
+        self.paint_canvas_shapes(&painter, origin, hover);
         self.paint_frame_headers(&painter,origin);
         self.paint_frame_drop_feedback(&painter,origin,
             ctx.input(|i|i.pointer.interact_pos()).or(hover));
@@ -667,16 +786,39 @@ impl MindmapApp {
                 let editing_border = self.doc.text_box(id).and_then(|b| b.border_color)
                     .map(color_from_rgb).unwrap_or(ACCENT);
                 let custom_fill = self.doc.text_box(id).is_some_and(|b| b.fill_color.is_some());
+                let alignment = self.doc.text_box(id).map(|b| match (b.text_horizontal, b.text_vertical) {
+                    (TextHorizontal::Left, TextVertical::Top) => Align2::LEFT_TOP,
+                    (TextHorizontal::Left, TextVertical::Center) => Align2::LEFT_CENTER,
+                    (TextHorizontal::Left, TextVertical::Bottom) => Align2::LEFT_BOTTOM,
+                    (TextHorizontal::Center, TextVertical::Top) => Align2::CENTER_TOP,
+                    (TextHorizontal::Center, TextVertical::Center) => Align2::CENTER_CENTER,
+                    (TextHorizontal::Center, TextVertical::Bottom) => Align2::CENTER_BOTTOM,
+                    (TextHorizontal::Right, TextVertical::Top) => Align2::RIGHT_TOP,
+                    (TextHorizontal::Right, TextVertical::Center) => Align2::RIGHT_CENTER,
+                    (TextHorizontal::Right, TextVertical::Bottom) => Align2::RIGHT_BOTTOM,
+                }).unwrap_or(Align2::LEFT_TOP);
+                // Keep the editor's IME/text origin identical to the committed
+                // painter (15px horizontal, 13px vertical inset in world UI).
+                let pad_x = (15.0 * self.zoom).round().clamp(8.0, 32.0) as i8;
+                let pad_y = (13.0 * self.zoom).round().clamp(6.0, 28.0) as i8;
+                let frame_stroke = Stroke::new(1.6, editing_border);
+                // TextEdit ignores `.margin()` when a custom frame is set.
+                // Put the inset on the frame itself so the IME cursor and the
+                // committed canvas text use the same origin and wrap width.
+                let frame_margin = egui::Margin::symmetric(pad_x, pad_y)
+                    - egui::Margin::from(frame_stroke.width);
                 let input = egui::TextEdit::multiline(&mut self.text_box_editor)
                     .id(egui::Id::unique(("annotation-text-edit", id)))
                     .font(FontId::proportional(15.5 * self.zoom))
                     .text_color(if custom_fill { INK } else if self.dark { Color32::WHITE } else { INK })
-                    .desired_width((rect.width() - 32.0 * self.zoom).max(50.0))
+                    .align(alignment)
+                    .desired_width(rect.width())
                     .desired_rows(((rect.height() / (23.0 * self.zoom)).floor() as usize).max(2))
-                    .margin(egui::Margin::symmetric(12, 10))
                     .frame(egui::Frame::new()
                         .fill(editing_bg)
-                        .stroke(Stroke::new(1.6, editing_border)).corner_radius(5));
+                        .stroke(frame_stroke)
+                        .inner_margin(frame_margin)
+                        .corner_radius(5));
                 let edit_response = ui.place(rect, input);
                 if self.text_box_focus_pending {
                     edit_response.request_focus();
@@ -770,10 +912,10 @@ impl MindmapApp {
         let suppress_context = cancelled_tool || self.suppress_canvas_context_once;
         if !suppress_context { response.context_menu(|ui| {
             if let Some(id)=self.context_shape {
-                if ui.button("⧉ Copy").clicked() {self.copy_selected(ui.ctx(),false);ui.close();}
-                if ui.button("⎘ Paste").clicked() {self.paste_from_system_clipboard();ui.close();}
-                if ui.button("✎ Edit Text").clicked() {self.start_shape_edit(id);ui.close();}
-                if ui.button("⧉ Duplicate").clicked(){self.duplicate_canvas_selection();ui.close();}
+                if ui.button(self.language.text("⧉ Copy", "⧉ コピー")).clicked() {self.copy_selected(ui.ctx(),false);ui.close();}
+                if ui.button(self.language.text("⎘ Paste", "⎘ 貼り付け")).clicked() {self.paste_from_system_clipboard();ui.close();}
+                if ui.button(self.language.text("✎ Edit Text", "✎ テキストを編集")).clicked() {self.start_shape_edit(id);ui.close();}
+                if ui.button(self.language.text("⧉ Duplicate", "⧉ 複製")).clicked(){self.duplicate_canvas_selection();ui.close();}
                 if self.doc.shape(id).is_some_and(|s|s.kind!=ShapeKind::Frame) {
                 }
                 if self.doc.shape(id).is_some_and(|s|s.kind==ShapeKind::Frame) {
@@ -783,10 +925,10 @@ impl MindmapApp {
                     if ui.add_enabled(selected_others>0,egui::Button::new(format!("Add {selected_others} Selected Items to Frame"))).clicked(){
                         self.attach_selection_to_frame(id);ui.close();
                     }
-                    if ui.button("Add Objects Inside Frame").clicked(){
+                    if ui.button(self.language.text("Add Objects Inside Frame", "フレーム内のオブジェクトを追加")).clicked(){
                         self.attach_contained_to_frame(id);ui.close();
                     }
-                    if ui.button("Remove All from Frame").clicked() {
+                    if ui.button(self.language.text("Remove All from Frame", "フレームからすべて削除")).clicked() {
                         self.checkpoint();if let Some(frame)=self.doc.shape_mut(id){frame.members.clear();}
                         self.refresh_frame_grid(id);ui.close();
                     }
@@ -796,12 +938,12 @@ impl MindmapApp {
                         }
                     });
                 }
-                if ui.button("▢ Create Frame from Selection").clicked(){self.create_frame_for_selection();ui.close();}
-                ui.menu_button("☷ Align",|ui|self.arrangement_menu(ui));
-                if ui.button("⌫ Delete").clicked() {self.select_shape(id,false);self.delete_selected();ui.close();}
+                if ui.button(self.language.text("▢ Create Frame from Selection", "▢ 選択範囲からフレームを作成")).clicked(){self.create_frame_for_selection();ui.close();}
+                ui.menu_button(self.language.text("☷ Align", "☷ 整列"),|ui|self.arrangement_menu(ui));
+                if ui.button(self.language.text("⌫ Delete", "⌫ 削除")).clicked() {self.select_shape(id,false);self.delete_selected();ui.close();}
                 ui.separator();
-                if ui.button("▣ Group").clicked() {self.group_selection();ui.close();}
-                if ui.button("▤ Ungroup").clicked() {self.ungroup_selection();ui.close();}
+                if ui.button(self.language.text("▣ Group", "▣ グループ化")).clicked() {self.group_selection();ui.close();}
+                if ui.button(self.language.text("▤ Ungroup", "▤ グループ解除")).clicked() {self.ungroup_selection();ui.close();}
                 ui.menu_button("◉ 色",|ui| {
                     for (i,label) in COLOR_LABELS.iter().enumerate() {
                         if Self::color_tile(ui,TINTS[i].fill,TINTS[i].border,label) {
@@ -810,8 +952,8 @@ impl MindmapApp {
                         }
                     }
                 });
-                ui.menu_button("枠Lines",|ui|{
-                    if ui.button("No Border").clicked(){self.checkpoint();if let Some(s)=self.doc.shape_mut(id){s.style.outline=None;}ui.close();}
+                ui.menu_button(self.language.text("Border", "枠線"),|ui|{
+                    if ui.button(self.language.text("No Border", "枠線なし")).clicked(){self.checkpoint();if let Some(s)=self.doc.shape_mut(id){s.style.outline=None;}ui.close();}
                     for (label,color) in [("Blue",[80,126,222]),("Green",[65,164,110]),("Gray",[110,126,155]),("Black",[38,44,60])]{
                         if ui.button(label).clicked(){self.checkpoint();if let Some(s)=self.doc.shape_mut(id){s.style.outline=Some(color);}ui.close();}
                     }
@@ -820,16 +962,17 @@ impl MindmapApp {
                         if ui.button(format!("{width:.0} px")).clicked(){self.checkpoint();if let Some(s)=self.doc.shape_mut(id){s.style.stroke_width=width;}ui.close();}
                     }
                 });
-                ui.menu_button("Text Alignment and Size",|ui|{
-                    ui.label("Horizontal Alignment");
+                ui.menu_button(self.language.text("Text alignment", "文字揃え"), |ui| self.text_alignment_menu(ui));
+                ui.menu_button(self.language.text("Text Alignment and Size", "文字の配置とサイズ"),|ui|{
+                    ui.label(self.language.text("Horizontal Alignment", "横位置"));
                     for (label,h) in [("Left",TextHorizontal::Left),("Center",TextHorizontal::Center),("Right",TextHorizontal::Right)]{
                         if ui.button(label).clicked(){self.checkpoint();if let Some(s)=self.doc.shape_mut(id){s.style.text_horizontal=h;}ui.close();}
                     }
-                    ui.label("Vertical Alignment");
+                    ui.label(self.language.text("Vertical Alignment", "縦位置"));
                     for (label,v) in [("Top",TextVertical::Top),("Center",TextVertical::Center),("Bottom",TextVertical::Bottom)]{
                         if ui.button(label).clicked(){self.checkpoint();if let Some(s)=self.doc.shape_mut(id){s.style.text_vertical=v;}ui.close();}
                     }
-                    ui.label("Font Size");
+                    ui.label(self.language.text("Font Size", "文字サイズ"));
                     for size in [12.0_f32,15.0,18.0,24.0,32.0]{
                         if ui.button(format!("{size:.0} pt")).clicked(){self.checkpoint();if let Some(s)=self.doc.shape_mut(id){s.style.text_size=size;}ui.close();}
                     }
@@ -862,7 +1005,7 @@ impl MindmapApp {
                 if ui.button("↑ Bring Forward").clicked() {self.change_selected_shape_z(1);ui.close();}
                 if ui.button("↓ Send Backward").clicked() {self.change_selected_shape_z(-1);ui.close();}
                 if ui.button("⇩ Send to Back").clicked() {self.change_selected_shape_z(-2);ui.close();}
-                if ui.button(if self.doc.shape(id).is_some_and(|s|s.locked){"Unlock"}else{"Lock"}).clicked() {
+                if ui.button(if self.doc.shape(id).is_some_and(|s|s.locked){"ロック解除"}else{"ロック"}).clicked() {
                     self.checkpoint();if let Some(s)=self.doc.shape_mut(id){s.locked=!s.locked;}ui.close();
                 }
             } else if let Some(id)=self.context_line {
@@ -882,7 +1025,7 @@ impl MindmapApp {
                 });
                 if ui.button("┄ Solid / Dashed").clicked(){self.checkpoint();if let Some(l)=self.doc.line_mut(id){l.dashed=!l.dashed;}ui.close();}
                 ui.menu_button("▧ Arrange Order",|ui|{
-                    for (label,d) in [("Bring to Front",2),("一つ前",1),("一つ後ろ",-1),("Send to Back",-2)] {
+                    for (label,d) in [("最前面へ",2),("一つ前",1),("一つ後ろ",-1),("最背面へ",-2)] {
                         if ui.button(label).clicked(){self.change_selected_line_z(d);ui.close();}
                     }
                 });
@@ -890,19 +1033,20 @@ impl MindmapApp {
             } else if let Some(id)=self.context_connector {
                 self.connector_context_menu(ui,id,&positions,origin);
             } else if let Some(id) = self.context_text_box {
-                if ui.button("✎ Edit Text").clicked() { self.start_text_box_edit(id, false); ui.close(); }
-                ui.menu_button("◉ Background Color", |ui| self.text_box_palette(ui, false));
-                ui.menu_button("◯ 枠Line Color", |ui| self.text_box_palette(ui, true));
-                if ui.button("⌫ Delete").clicked() { self.select_text_box(id); self.delete_selected(); ui.close(); }
+                if ui.button(self.language.text("✎ Edit Text", "✎ テキストを編集")).clicked() { self.start_text_box_edit(id, false); ui.close(); }
+                ui.menu_button(self.language.text("Text alignment", "文字揃え"), |ui| self.text_alignment_menu(ui));
+                ui.menu_button(self.language.text("◉ Background Color", "◉ 背景色"), |ui| self.text_box_palette(ui, false));
+                ui.menu_button(self.language.text("◯ Border Color", "◯ 枠線色"), |ui| self.text_box_palette(ui, true));
+                if ui.button(self.language.text("⌫ Delete", "⌫ 削除")).clicked() { self.select_text_box(id); self.delete_selected(); ui.close(); }
             } else if let Some(id) = self.context_target {
                 self.context_color(ui);
-                if self.selection.len() > 1 && ui.button("☷ Arrange Selection").clicked() { self.align_selection(); ui.close(); }
+                if self.selection.len() > 1 && ui.button(self.language.text("☷ Arrange Selection", "☷ 選択範囲を整列")).clicked() { self.align_selection(); ui.close(); }
                 ui.separator();
                 let attached:Vec<_>=self.doc.links.iter().copied()
                     .filter(|l|l.from==id || l.to==id).collect();
                 if !attached.is_empty() {
                     ui.menu_button("⛓ Link解除",|ui|{
-                        if ui.button(format!("Remove All ({})",attached.len())).clicked() {
+                        if ui.button(self.language.text("Remove All", "すべて削除").to_owned() + &format!(" ({})", attached.len())).clicked() {
                             self.checkpoint();
                             for l in &attached {self.doc.remove_link(l.from,l.to);}
                             self.selected_link=None;
@@ -920,27 +1064,25 @@ impl MindmapApp {
                         }
                     });
                 }
-                if ui.button("↗ Create Link from This Node").clicked() {
+                if ui.button(self.language.text("↗ Create Link from This Node", "↗ このノードからリンクを作成")).clicked() {
                     self.begin_link(id); ui.close();
                 }
-                if self.selection.len() == 2 && ui.button("⛓ Link Selected Nodes").clicked() {
+                if self.selection.len() == 2 && ui.button(self.language.text("⛓ Link Selected Nodes", "⛓ 選択したノードをリンク")).clicked() {
                     self.link_two_selected(); ui.close();
                 }
                 ui.separator();
-                if ui.button("▣ Group").clicked() { self.group_selection(); ui.close(); }
-                if ui.button("▤ Ungroup").clicked() { self.ungroup_selection(); ui.close(); }
+                if ui.button(self.language.text("▣ Group", "▣ グループ化")).clicked() { self.group_selection(); ui.close(); }
+                if ui.button(self.language.text("▤ Ungroup", "▤ グループ解除")).clicked() { self.ungroup_selection(); ui.close(); }
                 ui.separator();
-                if ui.button("⧉ Copy（選択Nodeのみ）").clicked() { self.copy_selected(ui.ctx(), false); ui.close(); }
-                if ui.button("⧉ Copy（子孫を含む）").clicked() { self.copy_selected(ui.ctx(), true); ui.close(); }
-                if ui.button("⎘ Paste").clicked() { self.paste_from_system_clipboard(); ui.close(); }
+                if ui.button(self.language.text("⧉ Copy (This Node Only)", "⧉ このノードのみコピー")).clicked() { self.copy_selected(ui.ctx(), false); ui.close(); }
+                if ui.button(self.language.text("⧉ Copy (Include Descendants)", "⧉ 子孫を含めてコピー")).clicked() { self.copy_selected(ui.ctx(), true); ui.close(); }
+                if ui.button(self.language.text("⎘ Paste", "⎘ 貼り付け")).clicked() { self.paste_from_system_clipboard(); ui.close(); }
                 ui.separator();
-                if ui.button("＋ Add Child").clicked() { self.select(id); self.add_child(); ui.close(); }
+                if ui.button(self.language.text("＋ Add Child", "＋ 子を追加")).clicked() { self.select(id); self.add_child(); ui.close(); }
                 if self.doc.parent(id).is_some() {
-                    if ui.button("⊕ Add Sibling").clicked() { self.select(id); self.add_sibling(); ui.close(); }
+                    if ui.button(self.language.text("⊕ Add Sibling", "⊕ 同階層を追加")).clicked() { self.select(id); self.add_sibling(); ui.close(); }
                 }
-                if id != ROOT {
-                    if ui.button("⌫ Delete").clicked() { self.delete_selected(); ui.close(); }
-                }
+                if ui.button(self.language.text("⌫ Delete", "⌫ 削除")).clicked() { self.delete_selected(); ui.close(); }
             } else if let Some(link) = self.context_link {
                 ui.menu_button("◉ Link Color", |ui| {
                     for (label, rgb) in [("Blue", [80,126,222]), ("Green", [65,164,110]),
@@ -953,17 +1095,17 @@ impl MindmapApp {
                         }
                     }
                 });
-                if ui.button("⌫ Delete Link").clicked() {
+                if ui.button(self.language.text("⌫ Delete Link", "⌫ リンクを削除")).clicked() {
                     self.selected_link = Some(link);
                     self.delete_selected_link(); ui.close();
                 }
             } else {
-                if ui.button("▨ Place Sticky Note").clicked() {self.insert_shape_mode=Some(ShapeKind::StickyNote);ui.close();}
-                if ui.button("／ Draw Line").clicked() {self.insert_shape_mode=None;self.insert_line_mode=true;ui.close();}
-                if ui.button("▢ Place Frame").clicked() {self.insert_shape_mode=Some(ShapeKind::Frame);ui.close();}
-                if ui.button("▭ Place Rectangle").clicked() {self.insert_shape_mode=Some(ShapeKind::Rectangle);ui.close();}
-                if ui.button("◯ Place Ellipse").clicked() {self.insert_shape_mode=Some(ShapeKind::Ellipse);ui.close();}
-                if ui.button("T Place Text Box").clicked() { self.insert_shape_mode=None;self.insert_text_box_mode = true; ui.close(); }
+                if ui.button(self.language.text("▨ Place Sticky Note", "▨ 付箋を配置")).clicked() {self.insert_shape_mode=Some(ShapeKind::StickyNote);ui.close();}
+                if ui.button(self.language.text("／ Draw Line", "／ 線を描画")).clicked() {self.insert_shape_mode=None;self.insert_line_mode=true;ui.close();}
+                if ui.button(self.language.text("▢ Place Frame", "▢ フレームを配置")).clicked() {self.insert_shape_mode=Some(ShapeKind::Frame);ui.close();}
+                if ui.button(self.language.text("▭ Place Rectangle", "▭ 長方形を配置")).clicked() {self.insert_shape_mode=Some(ShapeKind::Rectangle);ui.close();}
+                if ui.button(self.language.text("◯ Place Ellipse", "◯ 楕円を配置")).clicked() {self.insert_shape_mode=Some(ShapeKind::Ellipse);ui.close();}
+                if ui.button(self.language.text("T Place Text Box", "T テキストBOXを配置")).clicked() { self.insert_shape_mode=None;self.insert_text_box_mode = true; ui.close(); }
             }
         }); }
         if ctx.input(|i|i.pointer.button_released(PointerButton::Secondary)) {

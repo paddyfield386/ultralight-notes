@@ -81,7 +81,7 @@ impl MindmapApp {
         if self.doc.node(self.selected).is_none() {
             self.selected = self.doc.roots().first().copied().unwrap_or(ROOT);
         }
-        if self.selection.is_empty() && self.canvas_selection.is_empty() { self.selection.insert(self.selected); }
+        if self.selection.is_empty() && self.canvas_selection.is_empty() && self.doc.node(self.selected).is_some() { self.selection.insert(self.selected); }
         self.canvas_selection.retain(|target| self.doc.target_exists(*target));
     }
     pub(super) fn group_selection(&mut self) {

@@ -53,15 +53,15 @@ impl MindmapApp {
             .on_hover_text(label).clicked()
     }
     pub(super) fn text_box_palette(&mut self, ui: &mut egui::Ui, border: bool) {
-        if ui.button("Default Color").clicked() {
+        if ui.button(self.language.text("Default Color", "既定の色")).clicked() {
             self.apply_text_box_color(border, None);
             ui.close();
         }
-        if !border && ui.button("Transparent").clicked() {
+        if !border && ui.button(self.language.text("Transparent", "透明")).clicked() {
             self.apply_text_box_appearance(false, None, true);
             ui.close();
         }
-        if border && ui.button("No Line").clicked() {
+        if border && ui.button(self.language.text("No Line", "線なし")).clicked() {
             self.remove_text_box_border();
             ui.close();
         }

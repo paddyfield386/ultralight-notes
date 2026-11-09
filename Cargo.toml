@@ -4,6 +4,7 @@ version = "1.0.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Lightweight native mind mapping and diagram editor"
+authors = ["paddyfield386"]
 
 [dependencies]
 eframe = { version = "=0.37.0", default-features = false, features = ["glow", "default_fonts", "system_fonts", "clipboard", "x11", "wayland"] }
