@@ -27,6 +27,7 @@ impl MindmapApp {
                 for id in boxes {self.doc.delete_text_box(id);}
                 self.canvas_selection.retain(|t| self.doc.target_exists(*t));
                 self.selected_shape = None;
+                self.selected_table_cell=None;
                 self.selected_text_box = None;
                 if self.selection.is_empty() { return; }
             }
@@ -53,6 +54,7 @@ impl MindmapApp {
     pub(super) fn undo(&mut self) {
         self.finish_edit(true);
         self.finish_text_box_edit(true);
+        self.finish_shape_edit(true);
         if let Some(doc) = self.undo.pop() {
             self.redo.push(self.doc.clone());
             self.doc = doc;
@@ -61,12 +63,14 @@ impl MindmapApp {
             if self.selected_text_box.is_some_and(|id| self.doc.text_box(id).is_none()) { self.selected_text_box = None; }
             if self.selected_line.is_some_and(|id|self.doc.line(id).is_none()){self.selected_line=None;}
             if self.selected_shape.is_some_and(|id|self.doc.shape(id).is_none()){self.selected_shape=None;}
+            if self.selected_table_cell.is_some_and(|(id,_,_)|self.doc.shape(id).is_none()){self.selected_table_cell=None;}
             self.dirty = true;
         }
     }
     pub(super) fn redo(&mut self) {
         self.finish_edit(true);
         self.finish_text_box_edit(true);
+        self.finish_shape_edit(true);
         if let Some(doc) = self.redo.pop() {
             self.undo.push(self.doc.clone());
             self.doc = doc;
@@ -75,6 +79,7 @@ impl MindmapApp {
             if self.selected_text_box.is_some_and(|id| self.doc.text_box(id).is_none()) { self.selected_text_box = None; }
             if self.selected_line.is_some_and(|id|self.doc.line(id).is_none()){self.selected_line=None;}
             if self.selected_shape.is_some_and(|id|self.doc.shape(id).is_none()){self.selected_shape=None;}
+            if self.selected_table_cell.is_some_and(|(id,_,_)|self.doc.shape(id).is_none()){self.selected_table_cell=None;}
             self.dirty = true;
         }
     }

@@ -16,7 +16,142 @@ pub enum CanvasTarget {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ShapeKind { Rectangle, RoundedRectangle, Ellipse, Diamond, Parallelogram, Cylinder, Hexagon, Document, Text, StickyNote, Frame }
+pub enum ShapeKind { Rectangle, RoundedRectangle, Ellipse, Diamond, Parallelogram, Cylinder, Hexagon, Document, Text, StickyNote, Frame, Table }
+
+/// Table cells follow a fixed logical size, approximating a common spreadsheet's default
+/// 8.43-character column and 15-point row at 100% display scale.
+pub const TABLE_CELL_WIDTH: f32 = 84.0;
+pub const TABLE_CELL_HEIGHT: f32 = 24.0;
+pub const TABLE_INITIAL_ROWS: usize = 3;
+pub const TABLE_INITIAL_COLUMNS: usize = 3;
+
+/// Cell contents for a canvas table. Rows are stored in document order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TableData {
+    #[serde(default = "default_table_cells")]
+    pub cells: Vec<Vec<String>>,
+    /// Coordinates of cells whose stored source text is a formula. Empty or
+    /// missing metadata keeps legacy strings such as `=SUM(A1:A2)` literal.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub formula_cells: Vec<(usize, usize)>,
+    /// Row indices explicitly hidden by the user. Filtered rows are derived
+    /// from saved criteria rather than persisted as a second state.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub manually_hidden_rows: Vec<usize>,
+    /// Saved criteria used to derive rows excluded by filters.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filters: Vec<TableFilter>,
+    #[serde(default)]
+    pub header_row: bool,
+    #[serde(default)]
+    pub banded_rows: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_alignments: Option<Vec<Vec<TextHorizontal>>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merged_cells: Vec<TableMerge>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub row_heights: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub borders: Option<TableBorders>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_fills: Option<Vec<Vec<Option<[u8;3]>>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_text_colors: Option<Vec<Vec<Option<[u8;3]>>>>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TableBorders {
+    pub horizontal: Vec<Vec<Option<TableBorder>>>,
+    pub vertical: Vec<Vec<Option<TableBorder>>>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TableBorder {
+    pub color: [u8;3],
+    pub width: f32,
+    pub dash: TableBorderDash,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all="snake_case")]
+pub enum TableBorderDash { #[default] Solid, Dashed, Dotted }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableMerge {
+    pub row: usize,
+    pub column: usize,
+    pub rows: usize,
+    pub columns: usize,
+}
+
+/// One active filter per table column.
+#[derive(Debug, Clone, PartialEq, Hash, Serialize, Deserialize)]
+pub struct TableFilter {
+    pub column: usize,
+    pub criterion: TableFilterCriterion,
+}
+
+#[derive(Debug, Clone, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum TableFilterCriterion {
+    /// Keep only cells whose raw value is included in this list.
+    Values { included: Vec<String> },
+    /// Compare cell values to a user-supplied criterion.
+    Condition { operator: TableFilterOperator, value: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TableFilterOperator {
+    Equal,
+    NotEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
+    LessThan,
+    LessThanOrEqual,
+    Contains,
+    StartsWith,
+    EndsWith,
+}
+
+fn default_table_cells() -> Vec<Vec<String>> {
+    vec![vec![String::new(); TABLE_INITIAL_COLUMNS]; TABLE_INITIAL_ROWS]
+}
+impl Default for TableData {
+    fn default() -> Self { Self { cells: default_table_cells(), formula_cells:Vec::new(), manually_hidden_rows:Vec::new(), filters:Vec::new(), header_row:false, banded_rows:false, cell_alignments:None, merged_cells:Vec::new(), row_heights:Vec::new(),borders:None,cell_fills:None,cell_text_colors:None } }
+}
+impl TableData {
+    pub fn row_height(&self,row:usize)->f32 {self.row_heights.get(row).copied().unwrap_or(TABLE_CELL_HEIGHT)}
+    pub fn row_offset(&self,row:usize)->f32 {(0..row).map(|i|self.row_height(i)).sum()}
+    pub fn total_height(&self)->f32 {(0..self.cells.len()).map(|i|self.row_height(i)).sum()}
+    pub fn merge_at(&self,row:usize,column:usize)->Option<TableMerge> {
+        self.merged_cells.iter().copied().find(|merge|
+            merge.row.checked_add(merge.rows).is_some_and(|end|row>=merge.row&&row<end)
+                && merge.column.checked_add(merge.columns).is_some_and(|end|column>=merge.column&&column<end))
+    }
+    pub fn row_is_filtered_out(&self,row:usize)->bool {
+        let Some(cells)=self.cells.get(row) else{return false};
+        self.filters.iter().any(|filter|{
+            let value=cells.get(filter.column).map(String::as_str).unwrap_or("");
+            match &filter.criterion {
+                TableFilterCriterion::Values{included}=>!included.iter().any(|candidate|candidate==value),
+                TableFilterCriterion::Condition{operator,value:condition}=>{
+                    let ordering=value.trim().parse::<f64>().ok().zip(condition.trim().parse::<f64>().ok())
+                        .map(|(left,right)|left.partial_cmp(&right));
+                    let equal=ordering.flatten().map_or_else(||value.eq_ignore_ascii_case(condition),|order|order.is_eq());
+                    let matches=match operator {
+                        TableFilterOperator::Equal=>equal,
+                        TableFilterOperator::NotEqual=>!equal,
+                        TableFilterOperator::GreaterThan=>ordering.flatten().map_or_else(||value.to_lowercase()>condition.to_lowercase(),|order|order.is_gt()),
+                        TableFilterOperator::GreaterThanOrEqual=>ordering.flatten().map_or_else(||value.to_lowercase()>=condition.to_lowercase(),|order|!order.is_lt()),
+                        TableFilterOperator::LessThan=>ordering.flatten().map_or_else(||value.to_lowercase()<condition.to_lowercase(),|order|order.is_lt()),
+                        TableFilterOperator::LessThanOrEqual=>ordering.flatten().map_or_else(||value.to_lowercase()<=condition.to_lowercase(),|order|!order.is_gt()),
+                        TableFilterOperator::Contains=>value.to_lowercase().contains(&condition.to_lowercase()),
+                        TableFilterOperator::StartsWith=>value.to_lowercase().starts_with(&condition.to_lowercase()),
+                        TableFilterOperator::EndsWith=>value.to_lowercase().ends_with(&condition.to_lowercase()),
+                    };
+                    !matches
+                }
+            }
+        })
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -90,6 +225,9 @@ pub struct CanvasShape {
     /// Occupied cells for grid-managed Frame objects; omitted by legacy JSON.
     #[serde(default, skip_serializing_if="Option::is_none")]
     pub grid: Option<FrameGrid>,
+    /// Present only for `ShapeKind::Table`; optional for compatibility with old documents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<TableData>,
 }
 /// A free-standing world-space line, never attached to another object.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -209,6 +347,60 @@ pub fn validate_shapes(shapes: &[CanvasShape], lines: &[CanvasLine], connectors:
             if shape.kind!=ShapeKind::Frame {return Err("Frame以外に格子データが設定されています".into());}
             grid.validate(&shape.members)?;
         }
+        match (&shape.kind,&shape.table) {
+            (ShapeKind::Table,Some(table)) => {
+                let cols=table.cells.first().map_or(0,Vec::len);
+                if table.cells.is_empty()||table.cells.len()>50||cols==0||cols>50
+                    || table.cells.iter().any(|row|row.len()!=cols)
+                    || table.cells.iter().flatten().any(|cell|cell.len()>16_384)
+                    || table.formula_cells.iter().enumerate().any(|(index,(row,col))| {
+                        *row>=table.cells.len()||*col>=cols
+                            ||table.formula_cells.iter().skip(index+1).any(|other|other==&(*row,*col))
+                    })
+                    || table.manually_hidden_rows.iter().enumerate().any(|(index,row)| {
+                        *row>=table.cells.len()||table.manually_hidden_rows.iter().skip(index+1).any(|other|other==row)
+                    })
+                    || table.filters.len()>cols
+                    || table.filters.iter().enumerate().any(|(index,filter)| {
+                        filter.column>=cols||table.filters.iter().skip(index+1).any(|other|other.column==filter.column)
+                            ||match &filter.criterion {
+                                TableFilterCriterion::Values{included}=>included.len()>2500
+                                    ||included.iter().any(|value|value.len()>16_384)
+                                    ||included.iter().enumerate().any(|(i,value)|included.iter().skip(i+1).any(|other|other==value)),
+                                TableFilterCriterion::Condition{value,..}=>value.len()>16_384,
+                            }
+                    })
+                    || (shape.width-cols as f32*TABLE_CELL_WIDTH).abs()>0.01
+                    || (!table.row_heights.is_empty()&&(table.row_heights.len()!=table.cells.len()||table.row_heights.iter().any(|height|!height.is_finite()||*height<TABLE_CELL_HEIGHT)))
+                    || (shape.height-table.total_height()).abs()>0.01
+                    || table.cell_alignments.as_ref().is_some_and(|alignments|
+                        alignments.len()!=table.cells.len()||alignments.iter().any(|row|row.len()!=cols))
+                    || table.cell_fills.as_ref().is_some_and(|fills|fills.len()!=table.cells.len()||fills.iter().any(|row|row.len()!=cols))
+                    || table.cell_text_colors.as_ref().is_some_and(|colors|colors.len()!=table.cells.len()||colors.iter().any(|row|row.len()!=cols))
+                    || table.borders.as_ref().is_some_and(|borders|
+                        borders.horizontal.len()!=table.cells.len()+1
+                            ||borders.horizontal.iter().any(|row|row.len()!=cols)
+                            ||borders.vertical.len()!=table.cells.len()
+                            ||borders.vertical.iter().any(|row|row.len()!=cols+1)
+                            ||borders.horizontal.iter().chain(&borders.vertical).flatten().flatten().any(|border|!border.width.is_finite()||border.width<=0.0||border.width>100.0))
+                    || table.merged_cells.iter().enumerate().any(|(index,merge)| {
+                        merge.rows==0||merge.columns==0||(merge.rows==1&&merge.columns==1)
+                        || merge.row.checked_add(merge.rows).is_none_or(|end|end>table.cells.len())
+                        || merge.column.checked_add(merge.columns).is_none_or(|end|end>cols)
+                        || table.merged_cells.iter().skip(index+1).any(|other| {
+                            let (Some(merge_row_end),Some(merge_col_end),Some(other_row_end),Some(other_col_end))=
+                                (merge.row.checked_add(merge.rows),merge.column.checked_add(merge.columns),other.row.checked_add(other.rows),other.column.checked_add(other.columns)) else{return true};
+                            merge.row<other_row_end&&other.row<merge_row_end
+                                &&merge.column<other_col_end&&other.column<merge_col_end
+                        })
+                    }) {
+                    return Err("Table cell data is invalid".into());
+                }
+            }
+            (ShapeKind::Table,None) => return Err("Table data is missing".into()),
+            (_,Some(_)) => return Err("Table data is attached to a non-table shape".into()),
+            _=>{}
+        }
         for member in &shape.members {
             if !members.insert(*member) || *member==CanvasTarget::Shape(shape.id) {return Err("Frameの所属が重複しています".into());}
             let valid=match member {
@@ -251,7 +443,7 @@ mod tests {
     fn invalid_geometry_and_reference_are_rejected() {
         let s = CanvasShape { id: 1, kind: ShapeKind::Ellipse, position: Offset::default(),
             width: 180.0, height: 80.0, z: 0, visible: true, locked: false,
-            style: CanvasStyle::default(), text: String::new(), members:Vec::new(), grid:None };
+            style: CanvasStyle::default(), text: String::new(), members:Vec::new(), grid:None, table:None };
         let nodes = HashSet::from([3]);
         assert!(validate_shapes(&[s.clone()], &[], &[], &nodes, &HashSet::new(), 10).is_ok());
         let mut bad=s.clone(); bad.width=f32::NAN;

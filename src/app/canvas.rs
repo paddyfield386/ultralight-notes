@@ -54,6 +54,19 @@ impl MindmapApp {
             self.center_pending = false;
         }
         let mut origin = base + self.pan;
+        if let Some((rows,cols))=self.pending_table_create.take() {
+            self.finish_shape_edit(true);
+            self.checkpoint();
+            let width=TABLE_CELL_WIDTH*cols as f32;let height=TABLE_CELL_HEIGHT*rows as f32;
+            let center=(bounds.center()-origin)/self.zoom;
+            let id=self.doc.add_shape(ShapeKind::Table,Offset{x:center.x-width*0.5,y:center.y-height*0.5});
+            if let Some(shape)=self.doc.shape_mut(id) {
+                shape.width=width;shape.height=height;
+                if let Some(table)=shape.table.as_mut(){table.cells=vec![vec![String::new();cols];rows];}
+            }
+            self.insert_shape_mode=None;self.insert_text_box_mode=false;self.insert_line_mode=false;self.insert_connector_mode=false;
+            self.select_shape(id,false);
+        }
         let hover = ctx.input(|i| i.pointer.hover_pos()).filter(|p| bounds.contains(*p));
 
         // Scroll-wheel zoom works even if the inline TextEdit currently owns keyboard focus.
@@ -149,6 +162,35 @@ impl MindmapApp {
             } else { None }
         });
         let modifiers = ctx.input(|i| i.modifiers);
+        let table_move_handle_id = ctx.input(|i| i.pointer.press_origin().or_else(||i.pointer.interact_pos()))
+            .and_then(|p| self.selected_shape.filter(|id| self.table_move_handle_at(*id, p, origin)))
+            .filter(|id| self.doc.shape(*id).is_some_and(|s| s.kind == ShapeKind::Table));
+        let table_fill_handle_id=ctx.input(|i|i.pointer.press_origin())
+            .and_then(|p|self.selected_shape.filter(|id|self.table_fill_handle_at(*id,p,origin)));
+        // Keep ordinary clicks in the active cell editor behaving like text
+        // editing. Once the pointer moves far enough, convert the gesture to
+        // a table range drag and commit the edited cell.
+        if ctx.input(|i| i.pointer.button_pressed(PointerButton::Primary)) {
+            self.table_selection_press = self.editing_shape
+                .filter(|id| self.doc.shape(*id).is_some_and(|s| s.kind == ShapeKind::Table))
+                .and_then(|id| ctx.input(|i| i.pointer.press_origin())
+                    .and_then(|p| self.table_cell_at(id, p, origin).map(|(r,c)|(id,r,c,p))));
+        }
+        if let Some((id, start_row, start_col, start_pos)) = self.table_selection_press {
+            let (pointer, down) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.button_down(PointerButton::Primary)));
+            if down && pointer.is_some_and(|p| p.distance_sq(start_pos) >= 36.0) {
+                self.finish_shape_edit(true);
+                self.select_shape(id, false);
+                self.selected_table_cell = Some((id, start_row, start_col));
+                self.selected_table_range = Some((id, start_row, start_col, start_row, start_col));
+                self.table_selection_drag = Some((id, start_row, start_col));
+                self.table_selection_press = None;
+            }
+            if !down && !ctx.input(|i| i.pointer.button_pressed(PointerButton::Primary)) {
+                self.table_selection_press = None;
+            }
+        }
+        let mut inserted_cross_table_reference=false;
         if response.clicked_by(PointerButton::Primary) && !self.middle_pan {
             if hovered_connector.is_none() && !modifiers.shift && !modifiers.command {
                 self.selected_connectors.clear();
@@ -180,7 +222,44 @@ impl MindmapApp {
                 self.canvas_selection.clear();
                 self.selection.clear();
             } else if let Some(id) = hovered_shape {
-                self.select_shape(id,modifiers.shift||modifiers.command);
+                let cross_table_reference=self.editing_shape.filter(|source|
+                    self.doc.shape(*source).is_some_and(|s|s.kind==ShapeKind::Table)
+                    &&self.doc.shape(id).is_some_and(|s|s.kind==ShapeKind::Table)
+                    &&self.shape_edit_text.trim_start().starts_with('='))
+                    .and_then(|source|{
+                        let pointer=ctx.input(|i|i.pointer.interact_pos())?;
+                        let (r,c)=self.table_cell_at(id,pointer,origin)?;
+                        if source==id&&self.editing_table_cell==Some((r,c)){return None;}
+                        Some((source,r,c))
+                    });
+                if let Some((source,r,c))=cross_table_reference {
+                    inserted_cross_table_reference=true;
+                    let (sr,sc)=self.editing_table_cell.unwrap_or((0,0));
+                    let edit_id=egui::Id::new(("inline-table-cell",source,sr,sc));
+                    let state_before=egui::TextEdit::load_state(&ctx,edit_id).unwrap_or_default();
+                    let cursor_range=state_before.cursor.char_range();
+                    let start_char=cursor_range.map_or_else(||self.shape_edit_text.chars().count(),|r|r.primary.index.0.min(r.secondary.index.0));
+                    let end_char=cursor_range.map_or(start_char,|r|r.primary.index.0.max(r.secondary.index.0));
+                    let start_byte=self.shape_edit_text.char_indices().nth(start_char).map_or(self.shape_edit_text.len(),|(b,_)|b);
+                    let end_byte=self.shape_edit_text.char_indices().nth(end_char).map_or(self.shape_edit_text.len(),|(b,_)|b);
+                    let mut col=c+1;let mut letters=String::new();while col>0{let rem=(col-1)%26;letters.insert(0,char::from(b'A'+rem as u8));col=(col-1)/26;}
+                    let reference=if source==id{format!("{}{}",letters,r+1)}else{format!("{}:{}{}",id,letters,r+1)};
+                    self.shape_edit_text.replace_range(start_byte..end_byte,&reference);
+                    let token_end=start_byte+reference.len();
+                    let cursor=self.shape_edit_text[..token_end].chars().count();
+                    let mut state=state_before;
+                    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(cursor))));state.store(&ctx,edit_id);
+                    self.shape_edit_focus_pending=true;
+                    self.formula_reference_range=Some((start_byte,token_end));
+                    self.formula_reference_mode=true;
+                    self.formula_reference_target=Some((id,r,c));
+                    self.formula_reference_anchor=Some((id,r,c));
+                } else {
+                let keep_table_editor=self.selected_shape==Some(id)
+                    &&self.editing_shape==Some(id)
+                    &&self.doc.shape(id).is_some_and(|s|s.kind==ShapeKind::Table);
+                if !keep_table_editor {self.select_shape(id,modifiers.shift||modifiers.command);}
+                }
             } else if let Some(id) = hovered_line {
                 self.select_line(id,modifiers.shift||modifiers.command);
             } else if let Some(link) = hovered_link {
@@ -209,18 +288,102 @@ impl MindmapApp {
                 self.selection.clear();
             }
         }
+        if response.clicked() && !self.middle_pan && !inserted_cross_table_reference {
+            if let Some(id)=hovered_shape.filter(|id|self.doc.shape(*id).is_some_and(|s|s.kind==ShapeKind::Table)) {
+                let pointer=ctx.input(|i|i.pointer.interact_pos()).unwrap_or(bounds.center());
+                if let Some((row,col))=self.table_cell_at(id,pointer,origin) {
+                    if modifiers.shift {
+                        self.finish_shape_edit(true);
+                        let (start_row,start_col)=self.selected_table_range.filter(|(table,_,_,_,_)|*table==id)
+                            .map(|(_,r0,c0,_,_)|(r0,c0)).or_else(||self.selected_table_cell.filter(|(table,_,_)|*table==id).map(|(_,r,c)|(r,c)))
+                            .unwrap_or((row,col));
+                        self.select_shape(id,false);
+                        self.selected_table_cell=Some((id,row,col));
+                        self.selected_table_range=Some((id,start_row,start_col,row,col));
+                    } else if self.editing_shape!=Some(id)||self.editing_table_cell!=Some((row,col)) {
+                        self.finish_shape_edit(true);
+                        self.select_shape(id,false);
+                        self.selected_table_cell=Some((id,row,col));
+                        self.selected_table_range=Some((id,row,col,row,col));
+                    }
+                }
+            }
+        }
+        if response.clicked() && !self.middle_pan && !inserted_cross_table_reference {
+            if let Some(id)=table_move_handle_id {
+                self.finish_shape_edit(true);
+                self.select_shape(id, false);
+                self.selected_table_cell = None;
+                self.selected_table_range = None;
+            }
+            if let (Some((id, _, _)), Some(pointer)) = (self.selected_table_cell, ctx.input(|i| i.pointer.interact_pos())) {
+                if self.shape_screen_rect(id, origin).is_some_and(|rect| !rect.contains(pointer)) {
+                    self.finish_shape_edit(true);
+                    self.selected_table_cell = None;
+                    self.selected_table_range = None;
+                    self.table_selection_press = None;
+                }
+            }
+        }
+        // A primary drag that starts inside a table selects a rectangular cell
+        // range instead of moving the table object.
+        if response.drag_started_by(PointerButton::Primary) && !self.middle_pan && table_fill_handle_id.is_some() {
+            if let Some(id)=table_fill_handle_id {
+                if let Some((_,r0,c0,r1,c1))=self.selected_table_range.filter(|(table,_,_,_,_)|*table==id) {
+                    let (top,bottom,left,right)=(r0.min(r1),r0.max(r1),c0.min(c1),c0.max(c1));
+                    self.finish_shape_edit(true);
+                    self.table_fill_drag=Some((id,top,left,bottom,right,bottom,right));
+                }
+            }
+        }
+        if response.drag_started_by(PointerButton::Primary) && !self.middle_pan && table_move_handle_id.is_none() && table_fill_handle_id.is_none() {
+            let table_at_press = ctx.input(|i| i.pointer.press_origin())
+                .and_then(|p| self.hit_shape(p, origin))
+                .filter(|id| self.doc.shape(*id).is_some_and(|s| s.kind == ShapeKind::Table));
+            if let Some(id) = table_at_press {
+                if let Some(start) = ctx.input(|i| i.pointer.press_origin())
+                    .and_then(|p| self.table_cell_at(id, p, origin))
+                {
+                    self.finish_shape_edit(true);
+                    self.select_shape(id, false);
+                    self.selected_table_cell = Some((id, start.0, start.1));
+                    self.selected_table_range = Some((id, start.0, start.1, start.0, start.1));
+                    self.table_selection_drag = Some((id, start.0, start.1));
+                }
+            }
+        }
+        if response.dragged_by(PointerButton::Primary) && !self.middle_pan {
+            if let Some((id,top,left,bottom,right,_,_))=self.table_fill_drag {
+                if let Some((row,col))=ctx.input(|i|i.pointer.interact_pos()).and_then(|p|self.table_cell_at(id,p,origin)) {
+                    self.table_fill_drag=Some((id,top,left,bottom,right,row,col));
+                    self.selected_table_range=Some((id,top.min(row),left.min(col),bottom.max(row),right.max(col)));
+                    self.selected_table_cell=Some((id,row,col));
+                }
+            }
+            if let Some((id, start_row, start_col)) = self.table_selection_drag {
+                if let Some((row, col)) = ctx.input(|i| i.pointer.interact_pos())
+                    .and_then(|p| self.table_cell_at(id, p, origin))
+                {
+                    self.selected_table_cell = Some((id, row, col));
+                    self.selected_table_range = Some((id, start_row, start_col, row, col));
+                }
+            }
+        }
         if response.double_clicked() && !self.middle_pan {
-            if let Some(id) = hovered_shape { self.start_shape_edit(id); }
+            if let Some(id)=hovered_shape.filter(|id|self.doc.shape(*id).is_some_and(|s|s.kind==ShapeKind::Table)) {
+                let pointer=ctx.input(|i|i.pointer.interact_pos()).unwrap_or(bounds.center());
+                if let Some((row,col))=self.table_cell_at(id,pointer,origin){self.start_table_cell_edit(id,row,col);}
+            } else if let Some(id)=hovered_shape {self.start_shape_edit(id);}
             else if let Some(id)=hovered_connector {self.begin_connector_edit(id);}
-            else if let Some(id) = hovered_text_box { self.start_text_box_edit(id, false); }
-            else if let Some(id) = hovered { self.start_edit(id, false); }
+            else if let Some(id)=hovered_text_box {self.start_text_box_edit(id,false);}
+            else if let Some(id)=hovered {self.start_edit(id,false);}
         }
         // At the drag threshold the current pointer may already have moved off
         // the small circle. Identify its source from the original press position.
         let pressed_anchor=ctx.input(|i|i.pointer.press_origin())
             .filter(|p|bounds.contains(*p))
             .and_then(|p|self.find_anchor(p,&positions,origin));
-        if response.drag_started_by(PointerButton::Primary) && !self.middle_pan {
+        if response.drag_started_by(PointerButton::Primary) && !self.middle_pan && self.table_selection_drag.is_none() && self.table_fill_drag.is_none() {
             self.smart_snap_delta=Vec2::ZERO;
             // A press on an existing object cancels insertion mode so the
             // same gesture selects, resizes, or moves that object instead.
@@ -231,7 +394,7 @@ impl MindmapApp {
             if self.insert_text_box_mode && (hovered_shape.is_some() || hovered_text_box.is_some()) {
                 self.insert_text_box_mode = false;
             }
-            self.dragging = Some(if let Some(kind)=self.insert_shape_mode.filter(|kind| *kind != ShapeKind::StickyNote) {
+            self.dragging = Some(if let Some(kind)=self.insert_shape_mode.filter(|kind| *kind != ShapeKind::StickyNote && *kind != ShapeKind::Table) {
                 let pointer=ctx.input(|i|i.pointer.interact_pos()).unwrap_or(bounds.center());
                 Drag::CreateShape{kind,start:pointer,current:pointer}
             } else if self.insert_text_box_mode {
@@ -240,6 +403,16 @@ impl MindmapApp {
             } else if self.insert_line_mode {
                 let pointer=ctx.input(|i|i.pointer.interact_pos()).unwrap_or(bounds.center());
                 Drag::CreateLine{start:pointer,current:pointer}
+            } else if let Some(id)=table_move_handle_id {
+                self.finish_shape_edit(true);
+                self.selected_table_cell=None;
+                self.selected_table_range=None;
+                self.select_shape(id,false);
+                self.selected_table_cell=None;
+                self.selected_table_range=None;
+                self.drag_moving=self.selection_roots();
+                self.checkpoint();
+                Drag::Shape(id)
             } else if let Some((id,index))=connector_waypoint_hover {
                 self.begin_connector_waypoint_drag(id,&positions,origin);Drag::ConnectorWaypoint(id,index)
             } else if let Some(id)=connector_label_hover.filter(|id|self.selected_connector==Some(*id)) {
@@ -284,7 +457,7 @@ impl MindmapApp {
                 Drag::Marquee { start: pointer, current: pointer, additive: modifiers.shift || modifiers.command }
             });
         }
-        if response.dragged_by(PointerButton::Primary) && !self.middle_pan {
+        if response.dragged_by(PointerButton::Primary) && !self.middle_pan && self.table_selection_drag.is_none() && self.table_fill_drag.is_none() {
             match self.dragging {
                 Some(Drag::CreateShape{kind,start,..})=>{
                     let pointer=ctx.input(|i|i.pointer.interact_pos()).unwrap_or(start);
@@ -400,6 +573,9 @@ impl MindmapApp {
             ctx.request_repaint();
         }
         if response.drag_stopped_by(PointerButton::Primary) {
+            if let Some(fill)=self.table_fill_drag.take(){self.apply_table_fill(fill);}
+            self.table_selection_drag = None;
+            self.table_selection_press = None;
             self.smart_snap_delta=Vec2::ZERO;
             match self.dragging {
                 Some(Drag::CreateShape{kind,start,current})=>{
@@ -768,6 +944,7 @@ impl MindmapApp {
             }
         }
         // Free shapes are drawn above legacy annotations; hit-testing uses the same priority.
+        self.refresh_spreadsheet_cache();
         self.paint_canvas_shapes(&painter, origin, hover);
         self.paint_frame_headers(&painter,origin);
         self.paint_frame_drop_feedback(&painter,origin,
@@ -912,10 +1089,16 @@ impl MindmapApp {
         let suppress_context = cancelled_tool || self.suppress_canvas_context_once;
         if !suppress_context { response.context_menu(|ui| {
             if let Some(id)=self.context_shape {
+                if self.doc.shape(id).is_some_and(|s|s.kind==ShapeKind::Table) {
+                    if ui.button(self.language.text("＋▤ Add Row", "＋▤ 行を追加")).clicked(){self.table_add_row(id);ui.close();}
+                    if ui.button(self.language.text("＋▥ Add Column", "＋▥ 列を追加")).clicked(){self.table_add_column(id);ui.close();}
+                    ui.separator();
+                }
                 if ui.button(self.language.text("⧉ Copy", "⧉ コピー")).clicked() {self.copy_selected(ui.ctx(),false);ui.close();}
                 if ui.button(self.language.text("⎘ Paste", "⎘ 貼り付け")).clicked() {self.paste_from_system_clipboard();ui.close();}
-                if ui.button(self.language.text("✎ Edit Text", "✎ テキストを編集")).clicked() {self.start_shape_edit(id);ui.close();}
-                if ui.button(self.language.text("⧉ Duplicate", "⧉ 複製")).clicked(){self.duplicate_canvas_selection();ui.close();}
+                let is_table=self.doc.shape(id).is_some_and(|s|s.kind==ShapeKind::Table);
+                if !is_table && ui.button(self.language.text("✎ Edit Text", "✎ テキストを編集")).clicked() {self.start_shape_edit(id);ui.close();}
+                if !is_table && ui.button(self.language.text("⧉ Duplicate", "⧉ 複製")).clicked(){self.duplicate_canvas_selection();ui.close();}
                 if self.doc.shape(id).is_some_and(|s|s.kind!=ShapeKind::Frame) {
                 }
                 if self.doc.shape(id).is_some_and(|s|s.kind==ShapeKind::Frame) {
@@ -938,8 +1121,8 @@ impl MindmapApp {
                         }
                     });
                 }
-                if ui.button(self.language.text("▢ Create Frame from Selection", "▢ 選択範囲からフレームを作成")).clicked(){self.create_frame_for_selection();ui.close();}
-                ui.menu_button(self.language.text("☷ Align", "☷ 整列"),|ui|self.arrangement_menu(ui));
+                if !is_table && ui.button(self.language.text("▢ Create Frame from Selection", "▢ 選択範囲からフレームを作成")).clicked(){self.create_frame_for_selection();ui.close();}
+                if !is_table {ui.menu_button(self.language.text("☷ Align", "☷ 整列"),|ui|self.arrangement_menu(ui));}
                 if ui.button(self.language.text("⌫ Delete", "⌫ 削除")).clicked() {self.select_shape(id,false);self.delete_selected();ui.close();}
                 ui.separator();
                 if ui.button(self.language.text("▣ Group", "▣ グループ化")).clicked() {self.group_selection();ui.close();}
@@ -962,8 +1145,8 @@ impl MindmapApp {
                         if ui.button(format!("{width:.0} px")).clicked(){self.checkpoint();if let Some(s)=self.doc.shape_mut(id){s.style.stroke_width=width;}ui.close();}
                     }
                 });
-                ui.menu_button(self.language.text("Text alignment", "文字揃え"), |ui| self.text_alignment_menu(ui));
-                ui.menu_button(self.language.text("Text Alignment and Size", "文字の配置とサイズ"),|ui|{
+                if !is_table {ui.menu_button(self.language.text("Text alignment", "文字揃え"), |ui| self.text_alignment_menu(ui));}
+                if !is_table {ui.menu_button(self.language.text("Text Alignment and Size", "文字の配置とサイズ"),|ui|{
                     ui.label(self.language.text("Horizontal Alignment", "横位置"));
                     for (label,h) in [("Left",TextHorizontal::Left),("Center",TextHorizontal::Center),("Right",TextHorizontal::Right)]{
                         if ui.button(label).clicked(){self.checkpoint();if let Some(s)=self.doc.shape_mut(id){s.style.text_horizontal=h;}ui.close();}
@@ -976,7 +1159,7 @@ impl MindmapApp {
                     for size in [12.0_f32,15.0,18.0,24.0,32.0]{
                         if ui.button(format!("{size:.0} pt")).clicked(){self.checkpoint();if let Some(s)=self.doc.shape_mut(id){s.style.text_size=size;}ui.close();}
                     }
-                });
+                });}
                 if self.doc.shape(id).is_some_and(|s|s.kind==ShapeKind::StickyNote) {
                     if let Some(frame_id)=self.sticky_frame(id) {
                         ui.menu_button("▦ Grid Size",|ui| {
@@ -1001,10 +1184,10 @@ impl MindmapApp {
                     });
                 }
                 ui.separator();
-                if ui.button("⇧ Bring to Front").clicked() {self.change_selected_shape_z(2);ui.close();}
-                if ui.button("↑ Bring Forward").clicked() {self.change_selected_shape_z(1);ui.close();}
-                if ui.button("↓ Send Backward").clicked() {self.change_selected_shape_z(-1);ui.close();}
-                if ui.button("⇩ Send to Back").clicked() {self.change_selected_shape_z(-2);ui.close();}
+                if ui.button("⇧ 最前面へ").clicked() {self.change_selected_shape_z(2);ui.close();}
+                if ui.button("↑ 前面へ").clicked() {self.change_selected_shape_z(1);ui.close();}
+                if ui.button("↓ 背面へ").clicked() {self.change_selected_shape_z(-1);ui.close();}
+                if ui.button("⇩ 最背面へ").clicked() {self.change_selected_shape_z(-2);ui.close();}
                 if ui.button(if self.doc.shape(id).is_some_and(|s|s.locked){"ロック解除"}else{"ロック"}).clicked() {
                     self.checkpoint();if let Some(s)=self.doc.shape_mut(id){s.locked=!s.locked;}ui.close();
                 }

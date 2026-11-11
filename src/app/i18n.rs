@@ -24,6 +24,7 @@ impl Language {
     pub(super) fn ribbon_text<'a>(self, english: &'a str) -> &'a str {
         if matches!(self, Self::English) { return english; }
         match english {
+            "Table" => "表",
             "Text Box" => "テキストボックス",
             "Home" => "ホーム", "Insert" => "挿入",
             "File" => "ファイル", "Edit" => "編集", "Node" => "ノード",

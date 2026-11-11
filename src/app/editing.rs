@@ -218,7 +218,7 @@ impl MindmapApp {
         // Consume both Tab and Shift+Tab BEFORE drawing widgets, so neither
         // reaches egui's normal keyboard focus navigation. Respect IME preedit
         // and preserve ordinary Tab handling while editing a free text box.
-        let (tab, parent_tab) = if !ctrl && self.editing_text_box.is_none()
+        let (tab, parent_tab) = if !ctrl && self.editing_text_box.is_none() && self.editing_table_cell.is_none()
             && !self.ime_composing && !composing_now {
             ctx.input_mut(|i| {
                 if shift {
@@ -228,6 +228,63 @@ impl MindmapApp {
                 }
             })
         } else { (false, false) };
+        if !ctrl && self.editing_shape.is_none() {
+            if let Some((table_id,row,col))=self.selected_table_cell.filter(|(id,_,_)|
+                self.selected_shape==Some(*id)&&self.doc.shape(*id).is_some_and(|s|s.kind==ShapeKind::Table))
+            {
+                if ctx.input(|i|i.key_pressed(egui::Key::F2)) {
+                    ctx.input_mut(|i|{i.consume_key(egui::Modifiers::NONE,egui::Key::F2);});
+                    self.start_table_cell_edit(table_id,row,col);
+                    self.table_cell_input_mode=false;
+                    self.formula_reference_mode=false;
+                    return;
+                }
+                let movement=if tab{Some((0,if shift{-1}else{1},false,egui::Key::Tab))}
+                    else if parent_tab{Some((0,-1,false,egui::Key::Tab))}
+                    else if enter&&!shift{Some((1,0,false,egui::Key::Enter))}
+                    else{arrows.map(|key|match key{
+                        egui::Key::ArrowLeft=>(0,-1,shift,key),egui::Key::ArrowRight=>(0,1,shift,key),
+                        egui::Key::ArrowUp=>(-1,0,shift,key),egui::Key::ArrowDown=>(1,0,shift,key),_ => (0,0,false,key),
+                    })};
+                if let Some((dr,dc,extend,key))=movement {
+                    ctx.input_mut(|i|{i.consume_key(if key==egui::Key::Tab&&shift{egui::Modifiers::SHIFT}else{egui::Modifiers::NONE},key);});
+                    self.move_table_cell_selection(table_id,row,col,dr,dc,extend);
+                    return;
+                }
+                if delete {
+                    ctx.input_mut(|i|{i.consume_key(egui::Modifiers::NONE,egui::Key::Delete);i.consume_key(egui::Modifiers::NONE,egui::Key::Backspace);});
+                    let has_text=self.doc.shape(table_id).and_then(|s|s.table.as_ref()).and_then(|t|t.cells.get(row)).and_then(|r|r.get(col)).is_some_and(|text|!text.is_empty());
+                    if has_text {
+                        self.checkpoint();
+                        if let Some(table)=self.doc.shape_mut(table_id).and_then(|s|s.table.as_mut()){
+                            if let Some(cell)=table.cells.get_mut(row).and_then(|r|r.get_mut(col)){cell.clear();}
+                            table.formula_cells.retain(|coord|*coord!=(row,col));
+                        }
+                    }
+                    return;
+                }
+                let replacement=ctx.input(|i|i.events.iter().find_map(|event|match event{
+                    egui::Event::Text(text) if !text.is_empty()=>Some(text.clone()),
+                    egui::Event::Ime(egui::ImeEvent::Commit(text)) if !text.is_empty()=>Some(text.clone()),
+                    _=>None,
+                }));
+                if let Some(text)=replacement {
+                    self.start_table_cell_edit(table_id,row,col);
+                    self.shape_edit_text=text;
+                    self.formula_reference_mode=self.shape_edit_text.starts_with('=');
+                    self.table_cell_input_mode=true;
+                    self.table_overwrite_pending=false;
+                    self.table_hidden_overwrite_selection=false;
+                    let edit_id=egui::Id::new(("inline-table-cell",table_id,row,col));
+                    let mut state=egui::TextEdit::load_state(ctx,edit_id).unwrap_or_default();
+                    let cursor=self.shape_edit_text.chars().count();
+                    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(cursor))));
+                    state.store(ctx,edit_id);
+                    ctx.input_mut(|i|i.events.retain(|event|!matches!(event,egui::Event::Text(_)|egui::Event::Ime(egui::ImeEvent::Commit(_)))));
+                    return;
+                }
+            }
+        }
         if parent_tab {
             if self.selected_text_box.is_none() { self.select_parent(); }
             return;
@@ -252,6 +309,20 @@ impl MindmapApp {
         }
         if ctrl && ctx.input(|i|i.key_pressed(egui::Key::D)) {
             self.duplicate_canvas_selection();return;
+        }
+        if ctrl && ctx.input(|i|i.key_pressed(egui::Key::A)) && self.editing_shape.is_none() {
+            if let Some((table_id,_,_))=self.selected_table_cell.filter(|(id,_,_)|
+                self.selected_shape==Some(*id)&&self.doc.shape(*id).is_some_and(|s|s.kind==ShapeKind::Table)) {
+                if let Some(table)=self.doc.shape(table_id).and_then(|s|s.table.as_ref()) {
+                    let rows=table.cells.len();let columns=table.cells.first().map_or(0,Vec::len);
+                    if rows>0&&columns>0 {
+                        ctx.input_mut(|i|{i.consume_key(egui::Modifiers::COMMAND,egui::Key::A);i.consume_key(egui::Modifiers::CTRL,egui::Key::A);});
+                        self.selected_table_cell=Some((table_id,0,0));
+                        self.selected_table_range=Some((table_id,0,0,rows-1,columns-1));
+                        return;
+                    }
+                }
+            }
         }
         if let Some(id) = self.selected_text_box {
             if !ctrl && (f2 || space) { self.start_text_box_edit(id, false); }

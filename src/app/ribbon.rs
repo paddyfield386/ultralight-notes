@@ -9,7 +9,6 @@ struct RibbonPlan {
     secondary: bool,
     narrow: bool,
 }
-
 impl RibbonPlan {
     fn for_width(width: f32) -> Self {
         let width = if width.is_finite() { width.max(0.0) } else { 0.0 };
@@ -27,6 +26,7 @@ impl MindmapApp {
         match icon {
             "sticky" => self.insert_shape_mode == Some(ShapeKind::StickyNote),
             "frame" => self.insert_shape_mode == Some(ShapeKind::Frame),
+            "table" => self.insert_shape_mode == Some(ShapeKind::Table),
             "rect" => self.insert_shape_mode == Some(ShapeKind::Rectangle),
             "rounded" => self.insert_shape_mode == Some(ShapeKind::RoundedRectangle),
             "ellipse" => self.insert_shape_mode == Some(ShapeKind::Ellipse),
@@ -113,7 +113,7 @@ impl MindmapApp {
 
     /// Compact controls shared by the Home ribbon and a shape's context menu.
     pub(super) fn text_alignment_menu(&mut self, ui: &mut egui::Ui) {
-        ui.label(self.language.text("Horizontal", "横位置"));
+        ui.label(self.language.text("Horizontal", "水平方向"));
         ui.horizontal(|ui| {
             for (hint, value) in [("Left", TextHorizontal::Left), ("Center", TextHorizontal::Center), ("Right", TextHorizontal::Right)] {
                 if self.text_alignment_icon_button(ui, Some(value), None, self.language.ribbon_text(hint)) {
@@ -121,7 +121,7 @@ impl MindmapApp {
                 }
             }
         });
-        ui.label(self.language.text("Vertical", "縦位置"));
+        ui.label(self.language.text("Vertical", "垂直方向"));
         ui.horizontal(|ui| {
             for (hint, value) in [("Top", TextVertical::Top), ("Middle", TextVertical::Center), ("Bottom", TextVertical::Bottom)] {
                 if self.text_alignment_icon_button(ui, None, Some(value), self.language.ribbon_text(hint)) {
@@ -164,6 +164,7 @@ impl MindmapApp {
     }
     pub(super) fn icon(&mut self, ui: &egui::Ui, name: &'static str) -> egui::TextureId {
         let bytes: &'static [u8] = match name {
+            "calculator" => include_bytes!("../../assets/tabler/calculator.rgba"),
             "undo" => include_bytes!("../../assets/tabler/undo.rgba"),
             "redo" => include_bytes!("../../assets/tabler/redo.rgba"),
             "child" => include_bytes!("../../assets/tabler/child.rgba"),
@@ -193,6 +194,7 @@ impl MindmapApp {
             "sticky" => include_bytes!("../../assets/tabler/sticky.rgba"),
             "line" => include_bytes!("../../assets/tabler/line.rgba"),
             "frame" => include_bytes!("../../assets/tabler/frame.rgba"),
+            "table" => include_bytes!("../../assets/tabler/new_map.rgba"),
             "diamond" => include_bytes!("../../assets/tabler/diamond.rgba"),
             "orthogonal" => include_bytes!("../../assets/tabler/orthogonal.rgba"),
             _ => unreachable!("unknown ribbon icon"),
@@ -243,6 +245,98 @@ impl MindmapApp {
         }
         response.on_hover_text(label).clicked() && enabled
     }
+    fn table_insert_picker(&mut self, ui: &mut egui::Ui) {
+        let width = if self.ribbon_compact { 38.0 } else { 62.0 };
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 65.0), Sense::click());
+        let color = if self.dark { Color32::from_rgb(236, 241, 255) } else { Color32::from_rgb(79, 90, 134) };
+        if response.hovered() {
+            ui.painter().rect_filled(rect.shrink(2.0), 6.0, if self.dark { Color32::from_rgb(65, 71, 91) } else { Color32::from_rgb(232, 235, 254) });
+        }
+        let center = Pos2::new(rect.center().x, if self.ribbon_compact { rect.center().y } else { rect.top() + 22.0 });
+        let icon = Rect::from_center_size(center, egui::vec2(22.0, 22.0));
+        ui.painter().rect_stroke(icon, 2.0, Stroke::new(1.7, color), StrokeKind::Inside);
+        for i in 1..3 {
+            let x = icon.left() + icon.width() * i as f32 / 3.0;
+            let y = icon.top() + icon.height() * i as f32 / 3.0;
+            ui.painter().line_segment([Pos2::new(x, icon.top()), Pos2::new(x, icon.bottom())], Stroke::new(1.25, color));
+            ui.painter().line_segment([Pos2::new(icon.left(), y), Pos2::new(icon.right(), y)], Stroke::new(1.25, color));
+        }
+        if !self.ribbon_compact {
+            let label = self.language.text("Table", "\u{8868}");
+            let label_color = if self.dark { Color32::WHITE } else { INK };
+            let galley = ui.painter().layout(label.to_owned(), FontId::proportional(9.5), label_color, width - 6.0);
+            ui.painter().with_clip_rect(rect.shrink(2.0)).galley(Pos2::new(rect.center().x - galley.size().x * 0.5, rect.bottom() - galley.size().y - 4.0), galley, label_color);
+            ui.painter().text(Pos2::new(rect.right() - 8.0, rect.bottom() - 8.0), Align2::CENTER_CENTER, "v", FontId::proportional(8.0), color);
+        }
+        let response = response.on_hover_text(self.language.text("Insert Table", "\u{8868}\u{3092}\u{633f}\u{5165}"));
+        egui::Popup::menu(&response).width(245.0).show(|ui| {
+            ui.set_min_width(245.0);
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(self.language.text("Insert Table", "\u{8868}\u{3092}\u{633f}\u{5165}")).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new("表計算").small().color(if self.dark { Color32::from_gray(165) } else { Color32::from_gray(120) }));
+                });
+            });
+            ui.add_space(3.0);
+            ui.label(egui::RichText::new(self.language.text("Select table size", "\u{8868}\u{306E}\u{5927}\u{304D}\u{3055}\u{3092}\u{9078}\u{629E}")).small().color(if self.dark { Color32::from_gray(175) } else { Color32::from_gray(105) }));
+            ui.add_space(8.0);
+            let mut hover_size = None;
+            let mut chosen_size = None;
+            let mut cells = Vec::with_capacity(80);
+            egui::Grid::new("table-size-picker").min_col_width(20.0).max_col_width(20.0)
+                .spacing(egui::vec2(3.0, 3.0)).show(ui, |ui| {
+                for row in 1..=8 {
+                    for col in 1..=10 {
+                        let (cell, response) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), Sense::click());
+                        if response.hovered() { hover_size = Some((row, col)); }
+                        if response.clicked() { chosen_size = Some((row, col)); }
+                        cells.push((row, col, cell, response.hovered()));
+                    }
+                    ui.end_row();
+                }
+            });
+            let (preview_rows, preview_cols) = hover_size.unwrap_or((1, 1));
+            for (row, col, cell, cell_hovered) in cells {
+                let active = row <= preview_rows && col <= preview_cols;
+                let fill = if active { if self.dark { Color32::from_rgb(77, 91, 145) } else { Color32::from_rgb(210, 220, 255) } }
+                    else if cell_hovered { if self.dark { Color32::from_rgb(58, 65, 84) } else { Color32::from_rgb(240, 243, 251) } }
+                    else if self.dark { Color32::from_rgb(39, 45, 59) } else { Color32::WHITE };
+                let border = if active { ACCENT } else if self.dark { Color32::from_gray(100) } else { Color32::from_rgb(190, 198, 214) };
+                ui.painter().rect_filled(cell, 2.0, fill);
+                ui.painter().rect_stroke(cell, 2.0, Stroke::new(if active { 1.4 } else { 0.8 }, border), StrokeKind::Inside);
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let (rows, cols) = hover_size.unwrap_or((1, 1));
+                ui.label(egui::RichText::new(format!("{rows} x {cols}")).strong().color(ACCENT));
+                ui.label(egui::RichText::new(self.language.text("cells", "\u{30BB}\u{30EB}")).small());
+            });
+            if let Some((rows, cols)) = chosen_size {
+                self.pending_table_create = Some((rows, cols));
+                ui.close();
+            }
+        });
+    }
+    fn table_ribbon_button(&self,ui:&mut egui::Ui,glyph:&str,label:&str,enabled:bool)->bool {
+        self.table_ribbon_button_state(ui,glyph,label,enabled,false)
+    }
+    fn table_ribbon_button_state(&self,ui:&mut egui::Ui,glyph:&str,label:&str,enabled:bool,selected:bool)->bool {
+        let w=if self.ribbon_compact{38.0}else{62.0};
+        let (rect,response)=ui.allocate_exact_size(egui::vec2(w,65.0),Sense::click());
+        if (response.hovered()||selected)&&enabled {ui.painter().rect_filled(rect.shrink(2.0),6.0,if selected{if self.dark{Color32::from_rgb(82,74,135)}else{Color32::from_rgb(213,207,255)}}else if self.dark{Color32::from_rgb(65,71,91)}else{Color32::from_rgb(232,235,254)});}
+        let icon_color=if enabled {if self.dark{Color32::from_rgb(236,241,255)}else{Color32::from_rgb(79,90,134)}}else{Color32::from_gray(130)};
+        let icon_pos=Pos2::new(rect.center().x,if self.ribbon_compact{rect.center().y}else{rect.top()+23.0});
+        if glyph.starts_with("align-") {
+            for (i,len) in [14.0,9.0,12.0].into_iter().enumerate() {
+                let x=match glyph {"align-left"=>icon_pos.x-10.0,"align-right"=>icon_pos.x+10.0-len,_=>icon_pos.x-len/2.0};
+                let y=icon_pos.y-6.0+i as f32*6.0;
+                ui.painter().line_segment([Pos2::new(x,y),Pos2::new(x+len,y)],Stroke::new(2.0,icon_color));
+            }
+        } else {ui.painter().text(icon_pos,Align2::CENTER_CENTER,glyph,FontId::proportional(24.0),icon_color);}
+        if !self.ribbon_compact||self.ribbon_tab==2 {let font_size=if self.ribbon_compact{6.5}else{9.0};let label_color=if enabled{if self.dark{Color32::WHITE}else{INK}}else{Color32::GRAY};let galley=ui.painter().layout(label.to_owned(),FontId::proportional(font_size),label_color,w-2.0);ui.painter().with_clip_rect(rect.shrink(1.0)).galley(Pos2::new(rect.center().x-galley.size().x/2.0,rect.bottom()-galley.size().y-2.0),galley,label_color);}
+        response.on_hover_text(label).clicked()&&enabled
+    }
     pub(super) fn ribbon_group(ui: &mut egui::Ui, width: f32, label: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
         ui.allocate_ui_with_layout(egui::vec2(width, 82.0),
             egui::Layout::top_down(egui::Align::Center), |ui| {
@@ -258,10 +352,10 @@ impl MindmapApp {
     }
     pub(super) fn ribbon_view_settings(&mut self, ui: &mut egui::Ui) {
         if ui.checkbox(&mut self.grid.visible, self.language.ribbon_text("Show Dot Grid")).changed() { self.save_preferences(); }
-        if ui.button(self.language.ribbon_text("Grid Settings…")).clicked() { self.grid_settings_open = true; ui.close(); }
+        if ui.button(self.language.ribbon_text("Grid Settings\u{2026}")).clicked() { self.grid_settings_open = true; ui.close(); }
         ui.separator();
         if ui.checkbox(&mut self.reflow_on_add, self.language.ribbon_text("Automatically rearrange when adding")).changed() { self.save_preferences(); }
-        ui.label(egui::RichText::new(self.language.text("Off by default. Existing node positions are preserved.", "既定ではオフです。既存ノードの位置は維持されます。")).small().weak());
+        ui.label(egui::RichText::new(self.language.text("Off by default. Existing node positions are preserved.", "\u{9ED9}\u{8A8D}\u{3067}\u{306F}\u{7121}\u{52B9}\u{3067}\u{3059}\u{3002}\u{65E2}\u{5B58}\u{306E}\u{914D}\u{7F6E}\u{306F}\u{4FDD}\u{6301}\u{3055}\u{308C}\u{307E}\u{3059}\u{3002}")).small().weak());
         ui.separator();
         if ui.checkbox(&mut self.snap_to_grid, self.language.ribbon_text("Snap to Grid")).changed() {self.save_preferences();}
         ui.separator();
@@ -324,17 +418,75 @@ impl MindmapApp {
             }
         });
     }
+    fn show_table_filter_popup(&mut self,ctx:&egui::Context) {
+        let Some((table_id,column,position,mut included,mut condition))=self.table_filter_popup.take() else{return};
+        let Some(table)=self.doc.shape(table_id).and_then(|shape|shape.table.as_ref()) else{return};
+        let mut values:Vec<String>=table.cells.iter().map(|row|row.get(column).cloned().unwrap_or_default()).collect::<HashSet<_>>().into_iter().collect();
+        values.sort_by_key(|value|value.to_lowercase());
+        let mut apply=false;
+        let mut cancel=false;
+        egui::Area::new(egui::Id::unique(("table-filter-values",table_id,column)))
+            .order(egui::Order::Foreground).fixed_pos(position).show(ctx,|ui|egui::Frame::popup(ui.style()).show(ui,|ui|{
+                ui.set_min_width(220.0);ui.set_max_width(300.0);
+                ui.strong(format!("列 {} の絞り込み",column+1));
+                ui.horizontal(|ui|{
+                    if ui.selectable_label(condition.is_none(),"値リスト").clicked(){condition=None;}
+                    if ui.selectable_label(condition.is_some(),"条件").clicked(){condition.get_or_insert((TableFilterOperator::Equal,String::new()));}
+                });
+                if let Some((operator,value))=condition.as_mut(){
+                    egui::ComboBox::from_id_salt(("table-filter-operator",table_id,column)).selected_text(match operator{
+                        TableFilterOperator::Equal=>"等しい",TableFilterOperator::NotEqual=>"等しくない",
+                        TableFilterOperator::GreaterThan=>"より大きい",TableFilterOperator::GreaterThanOrEqual=>"以上",
+                        TableFilterOperator::LessThan=>"より小さい",TableFilterOperator::LessThanOrEqual=>"以下",
+                        TableFilterOperator::Contains=>"含む",TableFilterOperator::StartsWith=>"先頭が一致",TableFilterOperator::EndsWith=>"末尾が一致",
+                    }).show_ui(ui,|ui|{
+                        for (choice,label) in [(TableFilterOperator::Equal,"等しい"),(TableFilterOperator::NotEqual,"等しくない"),
+                            (TableFilterOperator::GreaterThan,"より大きい"),(TableFilterOperator::GreaterThanOrEqual,"以上"),
+                            (TableFilterOperator::LessThan,"より小さい"),(TableFilterOperator::LessThanOrEqual,"以下"),
+                            (TableFilterOperator::Contains,"含む"),(TableFilterOperator::StartsWith,"先頭が一致"),(TableFilterOperator::EndsWith,"末尾が一致")] {
+                            ui.selectable_value(operator,choice,label);
+                        }
+                    });
+                    ui.text_edit_singleline(value);
+                }else{
+                    ui.horizontal(|ui|{
+                        if ui.small_button("すべて選択").clicked(){included=values.iter().cloned().collect();}
+                        if ui.small_button("すべて解除").clicked(){included.clear();}
+                    });
+                    egui::ScrollArea::vertical().max_height(220.0).show(ui,|ui|{
+                        for value in &values {
+                            let label=if value.is_empty(){"(空白)".to_owned()}else{value.clone()};
+                            let mut selected=included.contains(value);
+                            if ui.checkbox(&mut selected,label).changed(){
+                                if selected{included.insert(value.clone());}else{included.remove(value);}
+                            }
+                        }
+                    });
+                }
+                ui.horizontal(|ui|{
+                    if ui.button("適用").clicked(){apply=true;}
+                    if ui.button("キャンセル").clicked(){cancel=true;}
+                });
+            }));
+        if apply {
+            if let Some((operator,value))=condition{self.apply_table_filter_condition(table_id,column,operator,value);}
+            else{self.apply_table_filter_values(table_id,column,included);}
+        } else if !cancel {self.table_filter_popup=Some((table_id,column,position,included,condition));}
+    }
     /// A responsive two-tab ribbon whose content never requests a scroll area.
     /// All operations fit at the current width by reducing label density and
     /// moving less frequent actions into the More menu when necessary.
     pub(super) fn ribbon(&mut self, ui: &mut egui::Ui) {
-        let tabs = [
-            self.language.text("Home", "ホーム"),
-            self.language.text("Insert", "挿入"),
+        let has_selected_table=self.selected_shape.is_some_and(|id|self.doc.shape(id).is_some_and(|s|s.kind==ShapeKind::Table));
+        let mut tabs = vec![
+            self.language.text("Home", "\u{30DB}\u{30FC}\u{30E0}"),
+            self.language.text("Insert", "\u{633F}\u{5165}"),
         ];
+        if has_selected_table {tabs.push(self.language.text("Table", "\u{8868}"));}
+        if self.ribbon_tab>=tabs.len(){self.ribbon_tab=0;}
         let full_width = ui.available_width();
         let plan = RibbonPlan::for_width(full_width);
-        self.ribbon_compact = plan.compact;
+        self.ribbon_compact = if has_selected_table&&self.ribbon_tab==2 {full_width<1100.0}else{plan.compact};
         let tile = if self.ribbon_compact { 38.0 } else { 62.0 };
         let group_width = |count: f32| count * (tile + 1.0) + 4.0;
         let has_selection = !self.selection.is_empty() && self.selected_text_box.is_none();
@@ -375,6 +527,10 @@ impl MindmapApp {
             .stroke(Stroke::new(1.0, if dark { Color32::from_gray(72) } else { Color32::from_rgb(227, 231, 243) }))
             .inner_margin(egui::Margin::symmetric(6, 5))
             .show(ui, |ui| {
+                // Keep the content panel's vertical footprint identical on
+                // Home, Insert, and Table, regardless of its controls.
+                ui.set_min_height(82.0);
+                ui.set_max_height(82.0);
                 // Stretch the bar to its parent width; the actions themselves
                 // stay compact rather than stretching individual groups.
                 ui.set_min_width((full_width - 12.0).max(0.0));
@@ -385,8 +541,8 @@ impl MindmapApp {
                             if self.ribbon_button(ui, "new_file", "New", true) { self.request_new(); }
                             if self.ribbon_button(ui, "open_file", "Open", true) { self.open_file_dialog(FileDialog::Open); }
                             if self.ribbon_button(ui, "save_file", "Save", true) { self.save(); }
-                            ui.menu_button("▾", |ui| {
-                                if ui.button("Save As…").clicked() {
+                            ui.menu_button("\u{25BE}", |ui| {
+                                if ui.button("Save As\u{2026}").clicked() {
                                     self.open_file_dialog(FileDialog::SaveAs);
                                     ui.close();
                                 }
@@ -396,6 +552,10 @@ impl MindmapApp {
                         Self::ribbon_group(ui, group_width(2.0), self.language.ribbon_text("Edit"), |ui| {
                             if self.ribbon_button(ui, "undo", "Undo", !self.undo.is_empty()) { self.undo(); }
                             if self.ribbon_button(ui, "redo", "Redo", !self.redo.is_empty()) { self.redo(); }
+                        });
+                        ui.separator();
+                        Self::ribbon_group(ui, group_width(1.0), "ツール", |ui| {
+                            if self.ribbon_button(ui, "calculator", "電卓", true) { self.calculator.open = !self.calculator.open; self.calculator.keyboard_focus=self.calculator.open; }
                         });
                         ui.separator();
                         Self::ribbon_group(ui, group_width(3.0), self.language.ribbon_text("Node"), |ui| {
@@ -411,7 +571,7 @@ impl MindmapApp {
                             });
                         }
                         ui.separator();
-                        Self::ribbon_group(ui, 82.0, self.language.text("Text alignment", "文字揃え"), |ui| self.ribbon_text_alignment(ui));
+                        Self::ribbon_group(ui, 82.0, self.language.text("Text alignment", "\u{6587}\u{5B57}\u{63C3}\u{3048}"), |ui| self.ribbon_text_alignment(ui));
                         if !plan.narrow {
                             ui.separator();
                             Self::ribbon_group(ui, group_width(3.0), self.language.ribbon_text("View"), |ui| {
@@ -442,12 +602,12 @@ impl MindmapApp {
                             Self::ribbon_group(ui, 114.0, self.language.ribbon_text("Color"), |ui| self.ribbon_inline_palette(ui));
                         } else {
                             Self::ribbon_group(ui, 77.0, self.language.ribbon_text("Color"), |ui| {
-                                ui.menu_button(self.language.ribbon_text("Color ▾"), |ui| self.ribbon_color_menu(ui));
+                                ui.menu_button(self.language.ribbon_text("Color \u{25BE}"), |ui| self.ribbon_color_menu(ui));
                             });
                         }
                         ui.separator();
                         Self::ribbon_group(ui, 77.0, self.language.ribbon_text("View"), |ui| {
-                            ui.menu_button(self.language.text("More ▾", "その他 ▾"), |ui| {
+                            ui.menu_button(self.language.text("More", "その他"), |ui| {
                                 if plan.narrow {
                                     if ui.button(self.language.ribbon_text("Arrange Branch")).clicked() { self.align_selection(); ui.close(); }
                                     if ui.button(self.language.ribbon_text("Arrange All")).clicked() { self.reset_all_layout(); ui.close(); }
@@ -471,14 +631,14 @@ impl MindmapApp {
                                     ui.separator();
                                 }
                                 ui.separator();
-                                if ui.button(self.language.ribbon_text("Find Node…  Ctrl+F")).clicked() {
+                                if ui.button(self.language.ribbon_text("Find Node\u{2026}  Ctrl+F")).clicked() {
                                     self.search_open = true;
                                     self.search_focus_pending = true;
                                     ui.close();
                                 }
                                 ui.menu_button(self.language.ribbon_text("Export Image"), |ui| {
-                                    if ui.button(self.language.ribbon_text("Save as PNG…")).clicked() { self.export_file(true); ui.close(); }
-                                    if ui.button(self.language.ribbon_text("Save as SVG…")).clicked() { self.export_file(false); ui.close(); }
+                                    if ui.button(self.language.ribbon_text("Save as PNG\u{2026}")).clicked() { self.export_file(true); ui.close(); }
+                                    if ui.button(self.language.ribbon_text("Save as SVG\u{2026}")).clicked() { self.export_file(false); ui.close(); }
                                     if ui.button(self.language.ribbon_text("Copy Image")).clicked() { self.copy_image(); ui.close(); }
                                 });
                                 self.ribbon_view_settings(ui);
@@ -494,7 +654,7 @@ impl MindmapApp {
                                 });
                                 ui.separator();
                                 if self.selected_shape.is_some() || self.selected_text_box.is_some() {
-                                    ui.menu_button(self.language.text("Text alignment", "文字揃え"), |ui| self.text_alignment_menu(ui));
+                                    ui.menu_button(self.language.text("Text alignment", "\u{6587}\u{5B57}\u{63C3}\u{3048}"), |ui| self.text_alignment_menu(ui));
                                     ui.separator();
                                 }
                                 ui.menu_button(self.language.ribbon_text("Align"),|ui|self.arrangement_menu(ui));
@@ -507,13 +667,13 @@ impl MindmapApp {
                                 ui.separator();
                                 if ui.button(self.language.ribbon_text("Duplicate Ctrl+D")).clicked(){self.duplicate_canvas_selection();ui.close();}
                                 ui.menu_button(self.language.ribbon_text("Arrange Order"), |ui| {
-                                    for (label,d) in [("Bring to Front",2),("Bring Forward",1),("Send Backward",-1),("Send to Back",-2)] {
-                                        if ui.button(self.language.ribbon_text(label)).clicked() {self.change_selected_shape_z(d);ui.close();}
+                                    for (label,d) in [("最前面へ",2),("前面へ",1),("背面へ",-1),("最背面へ",-2)] {
+                                        if ui.button(label).clicked() {self.change_selected_shape_z(d);ui.close();}
                                     }
                                 });
                             });
                         });
-                    } else {
+                    } else if self.ribbon_tab==1 {
                         Self::ribbon_group(ui,group_width(1.0),self.language.ribbon_text("Sticky Note"),|ui| {
                             if self.ribbon_button(ui,"sticky","Sticky Note",true){
                                 self.insert_text_box_mode=false;self.insert_line_mode=false;
@@ -527,7 +687,7 @@ impl MindmapApp {
                             }
                         });
                         ui.separator();
-                        Self::ribbon_group(ui, group_width(2.0), self.language.ribbon_text("Canvas"), |ui| {
+                        Self::ribbon_group(ui, group_width(3.0), self.language.ribbon_text("Canvas"), |ui| {
                             if self.ribbon_button(ui, "insert_text", "Text Box", true) {
                                 self.insert_shape_mode=None;
                                 self.insert_line_mode=false;
@@ -536,6 +696,7 @@ impl MindmapApp {
                                 self.finish_text_box_edit(true);
                             }
                             if self.ribbon_button(ui, "new_map", "Add Map", true) { self.add_map(); }
+                            self.table_insert_picker(ui);
                         });
                         ui.separator();
                         Self::ribbon_group(ui, group_width(1.0), self.language.ribbon_text("Link"), |ui| {
@@ -563,7 +724,7 @@ impl MindmapApp {
                                      self.insert_line_mode=true;self.insert_connector_mode=false;
                                  }
                              });
-                            ui.menu_button(self.language.ribbon_text("More Shapes ▾"),|ui|{
+                            ui.menu_button(self.language.ribbon_text("More Shapes \u{25BE}"),|ui|{
                                 for (label,kind) in [
                                     ("Parallelogram (Input/Output)",ShapeKind::Parallelogram),
                                     ("Cylinder (Database)",ShapeKind::Cylinder),
@@ -577,7 +738,7 @@ impl MindmapApp {
                                 }
                             });
                         } else {
-                            ui.menu_button(self.language.ribbon_text("Shapes ▾"),|ui|{
+                            ui.menu_button(self.language.ribbon_text("Shapes \u{25BE}"),|ui|{
                                 for (label,kind) in [
                                     ("Rectangle",ShapeKind::Rectangle),("RoundedRectangle",ShapeKind::RoundedRectangle),
                                     ("Ellipse",ShapeKind::Ellipse),("Diamond (Decision)",ShapeKind::Diamond),
@@ -611,7 +772,7 @@ impl MindmapApp {
                                 }
                             });
                         } else {
-                            ui.menu_button(self.language.ribbon_text("Connector ▾"),|ui|{
+                            ui.menu_button(self.language.ribbon_text("Connector \u{25BE}"),|ui|{
                                 for (label,route,arrow) in [("Connector",ConnectorRoute::Straight,false),
                                                       ("Connector (Arrow)",ConnectorRoute::Orthogonal,true)] {
                                     if ui.button(self.language.ribbon_text(label)).clicked(){
@@ -626,6 +787,87 @@ impl MindmapApp {
                         ui.separator();
                         // Tool cancellation is discoverable from the cursor and help, not a ribbon label.
                         // Group/Ungroup remain in the context menu/shortcuts.
+                    } else {
+                        if let Some(id)=self.selected_shape.filter(|id|self.doc.shape(*id).is_some_and(|s|s.kind==ShapeKind::Table)) {
+                            let (row,col)=self.selected_table_cell.filter(|(table,_,_)|*table==id)
+                                .map(|(_,row,col)|(row,col)).unwrap_or((0,0));
+                            let (rows,cols)=self.doc.shape(id).and_then(|s|s.table.as_ref())
+                                .map(|t|(t.cells.len(),t.cells.first().map_or(0,Vec::len))).unwrap_or((1,1));
+                            let header=self.doc.shape(id).and_then(|s|s.table.as_ref()).is_some_and(|t|t.header_row);
+                            let banded=self.doc.shape(id).and_then(|s|s.table.as_ref()).is_some_and(|t|t.banded_rows);
+                            let selected_range=self.selected_table_range.filter(|(table,_,_,_,_)|*table==id);
+                            let can_merge=selected_range.is_some_and(|(_,r0,c0,r1,c1)|r0!=r1||c0!=c1);
+                            let can_unmerge=self.doc.shape(id).and_then(|s|s.table.as_ref()).and_then(|t|t.merge_at(row,col)).is_some();
+                            Self::ribbon_group(ui,group_width(4.1),self.language.text("Rows & Columns","\u{884c}\u{3068}\u{5217}"),|ui|{
+                                if self.table_ribbon_button(ui,"\u{FF0B}","\u{884C}\u{8FFD}\u{52A0}",rows<50){self.table_insert_row(id,row+1);}
+                                if self.table_ribbon_button(ui,"\u{FF0B}","\u{5217}\u{8FFD}\u{52A0}",cols<50){self.table_insert_column(id,col+1);}
+                                if self.table_ribbon_button(ui,"\u{2212}","\u{884C}\u{524A}\u{9664}",rows>1){self.table_delete_row(id,row);}
+                                if self.table_ribbon_button(ui,"\u{2212}","\u{5217}\u{524A}\u{9664}",cols>1){self.table_delete_column(id,col);}
+                            });
+                            ui.separator();
+                            let has_filters=self.doc.shape(id).and_then(|s|s.table.as_ref()).is_some_and(|t|!t.filters.is_empty());
+                            let row_hidden=self.doc.shape(id).and_then(|s|s.table.as_ref()).is_some_and(|t|t.manually_hidden_rows.contains(&row));
+                            Self::ribbon_group(ui,group_width(3.4),"データ",|ui|{
+                                if self.table_ribbon_button(ui,"▾","値で絞り込み",row<rows&&col<cols){self.open_table_filter_popup(ui.ctx(),id,col);}
+                                if self.table_ribbon_button(ui,"×","フィルター解除",has_filters){self.clear_table_filters(id);}
+                                if self.table_ribbon_button(ui,"↕",if row_hidden{"行を再表示"}else{"行を非表示"},row<rows){self.toggle_table_row_hidden(id,row);}
+                            });
+                            ui.separator();
+                            Self::ribbon_group(ui,group_width(2.1),self.language.text("Style","\u{30B9}\u{30BF}\u{30A4}\u{30EB}"),|ui|{
+                                if self.table_ribbon_button(ui,if header{"\u{25A4}"}else{"\u{25A5}"},"\u{898B}\u{51FA}\u{3057}",true){self.toggle_table_header();}
+                                if self.table_ribbon_button(ui,if banded{"\u{25A6}"}else{"\u{25A5}"},"\u{7E1E}\u{6A21}\u{69D8}",true){self.toggle_table_banded_rows();}
+                            });
+                            ui.separator();
+                            Self::ribbon_group(ui,group_width(5.1),self.language.text("Cell","\u{30BB}\u{30EB}"),|ui|{
+                                for (choice,glyph,label) in [(TextHorizontal::Left,"align-left","\u{5DE6}\u{63C3}\u{3048}"),(TextHorizontal::Center,"align-center","\u{4E2D}\u{592E}\u{63C3}\u{3048}"),(TextHorizontal::Right,"align-right","\u{53F3}\u{63C3}\u{3048}")] {
+                                    if self.table_ribbon_button(ui,glyph,label,true){self.set_selected_table_alignment(choice);}
+                                }
+                                if self.table_ribbon_button(ui,"\u{21D4}","\u{7D50}\u{5408}",can_merge){self.merge_selected_table_cells();}
+                                if self.table_ribbon_button(ui,"\u{2194}","\u{89E3}\u{9664}",can_unmerge){self.unmerge_selected_table_cells();}
+                            });
+                            ui.separator();
+                            Self::ribbon_group(ui,120.0,self.language.text("Fill Color","\u{586B}\u{308A}\u{3064}\u{3076}\u{3057}"),|ui|{
+                                ui.vertical(|ui| {
+                                    ui.spacing_mut().item_spacing = egui::vec2(3.0, 2.0);
+                                    for row in 0..2 {
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 3.0;
+                                            for index in row*4..row*4+4 {
+                                                let color=TINTS[index].fill;
+                                                if Self::color_tile(ui,color,TINTS[index].border,COLOR_LABELS[index]) {
+                                                    self.table_fill_color=rgb_of(color);
+                                                    self.set_selected_table_fill(Some(self.table_fill_color));
+                                                }
+                                            }
+                                        });
+                                    }
+                                    if ui.small_button(self.language.text("Default","\u{521D}\u{671F}\u{5024}")).clicked() {
+                                        self.set_selected_table_fill(None);
+                                    }
+                                });
+                            });
+                            ui.separator();
+                            Self::ribbon_group(ui,120.0,self.language.text("Font Color","\u{6587}\u{5B57}\u{8272}"),|ui|{
+                                ui.vertical(|ui| {
+                                    ui.spacing_mut().item_spacing = egui::vec2(3.0, 2.0);
+                                    for row in 0..2 {
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 3.0;
+                                            for index in row*4..row*4+4 {
+                                                let color=TINTS[index].line;
+                                                if Self::color_tile(ui,color,TINTS[index].border,COLOR_LABELS[index]) {
+                                                    self.table_text_color=rgb_of(color);
+                                                    self.set_selected_table_text_color(Some(self.table_text_color));
+                                                }
+                                            }
+                                        });
+                                    }
+                                    if ui.small_button(self.language.text("Default","\u{521D}\u{671F}\u{5024}")).clicked() {
+                                        self.set_selected_table_text_color(None);
+                                    }
+                                });
+                            });
+                        }
                     }
                 });
             });
@@ -641,6 +883,8 @@ impl MindmapApp {
                     else { self.ribbon_tab.saturating_sub(1) };
             }
         }
+        self.show_table_filter_popup(ui.ctx());
+        self.calculator_window(ui.ctx());
     }
 }
 

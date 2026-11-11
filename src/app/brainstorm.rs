@@ -1,6 +1,7 @@
 //! Brainstorming canvas: free lines, frames, inline editing, alignment and duplication.
 //! Geometry is stored in world units; all visual hit tolerance is in screen pixels.
 use super::*;
+use crate::spreadsheet::catalog;
 
 #[derive(Clone, Copy, Debug)]
 #[allow(dead_code)]
@@ -125,6 +126,272 @@ impl MindmapApp {
         let Some(shape)=self.doc.shape(id) else {self.editing_shape=None;return};
         let Some(bounds)=self.shape_screen_rect(id,origin) else {return};
         let kind=shape.kind;
+        if kind==ShapeKind::Table {
+            let Some((row,col))=self.editing_table_cell else{return};
+            let Some(table)=shape.table.as_ref() else{return};
+            let rows=table.cells.len();let cols=table.cells.first().map_or(0,Vec::len);
+            if rows==0||cols==0{return;}
+            let merge=table.merge_at(row,col).unwrap_or(TableMerge{row,column:col,rows:1,columns:1});
+            let base_cell=Rect::from_min_max(
+                egui::pos2(bounds.left()+bounds.width()*merge.column as f32/cols as f32,bounds.top()+self.zoom*table.row_offset(merge.row)),
+                egui::pos2(bounds.left()+bounds.width()*(col+1) as f32/cols as f32,bounds.top()+bounds.height()*(row+1) as f32));
+            let cell=Rect::from_min_size(base_cell.min,egui::vec2(
+                bounds.width()*merge.columns as f32/cols as f32,self.zoom*(merge.row..merge.row+merge.rows).map(|i|table.row_height(i)).sum::<f32>()));
+            let parent_clip=ui.clip_rect();
+            let mut cell_ui=ui.new_child(egui::UiBuilder::new().max_rect(cell)
+                .layout(egui::Layout::centered_and_justified(egui::Direction::TopDown)));
+            cell_ui.set_clip_rect(cell.intersect(parent_clip));
+            cell_ui.spacing_mut().interact_size.y=cell.height();
+            cell_ui.spacing_mut().item_spacing=Vec2::ZERO;
+            cell_ui.painter().rect_filled(cell,0.0,Color32::WHITE);
+            cell_ui.painter().rect_stroke(cell,0.0,Stroke::new(1.5,ACCENT),StrokeKind::Inside);
+            let horizontal=table.cell_alignments.as_ref().and_then(|a|a.get(row)).and_then(|a|a.get(col))
+                .copied().unwrap_or(TextHorizontal::Center);
+            let cell_text_color=table.cell_text_colors.as_ref().and_then(|colors|colors.get(row)).and_then(|r|r.get(col)).copied().flatten().unwrap_or(shape.style.text);
+            let click_to_position=!self.shape_edit_focus_pending&&ctx.input(|i|i.pointer.button_pressed(PointerButton::Primary)
+                &&i.pointer.interact_pos().is_some_and(|p|cell.contains(p)));
+            if click_to_position {self.table_hidden_overwrite_selection=false;self.table_cell_input_mode=false;self.formula_reference_mode=false;}
+            if self.table_hidden_overwrite_selection {
+                // Retain the full text selection for overwrite, but render it
+                // with the ordinary text and cell colors.
+                let visuals=cell_ui.visuals_mut();
+                visuals.selection.bg_fill=Color32::TRANSPARENT;
+                visuals.selection.stroke.color=color_from_rgb(cell_text_color);
+            }
+            let edit_align=match horizontal {TextHorizontal::Left=>Align2::LEFT_CENTER,TextHorizontal::Center=>Align2::CENTER_CENTER,TextHorizontal::Right=>Align2::RIGHT_CENTER};
+            let edit_id=egui::Id::new(("inline-table-cell",id,row,col));
+            let editor_focused=ctx.memory(|memory|memory.has_focus(edit_id));
+            let cursor_char=egui::TextEdit::load_state(ctx,edit_id)
+                .and_then(|state|state.cursor.char_range()).map(|range|range.primary.index.0)
+                .unwrap_or_else(||self.shape_edit_text.chars().count());
+            let cursor_byte=self.shape_edit_text.char_indices().nth(cursor_char)
+                .map_or(self.shape_edit_text.len(),|(byte,_)|byte);
+            let completion=if editor_focused&&self.shape_edit_text.starts_with('=') {catalog::function_prefix_at(&self.shape_edit_text,cursor_byte)
+                .map(|prefix|(cursor_byte-prefix.len(),cursor_byte,prefix.to_owned()))}else{None};
+            let candidates=completion.as_ref().map_or_else(Vec::new,|(_,_,prefix)|catalog::candidates(prefix));
+            let candidates_hidden=completion.as_ref().is_some_and(|(_,_,prefix)|self.formula_candidates_hidden_prefix.as_ref()==Some(prefix));
+            let candidates_visible=!candidates.is_empty()&&!candidates_hidden;
+            if !candidates_visible {self.formula_candidate_index=0;}
+            else {self.formula_candidate_index=self.formula_candidate_index.min(candidates.len()-1);}
+            let mut candidate_key_consumed=false;
+            // A direct replacement entry is committed by an arrow key, then
+            // the table selection moves in that direction. In-place editing
+            // keeps ordinary caret behavior unless the formula point mode is active.
+            if editor_focused && self.table_cell_input_mode && !self.shape_edit_text.starts_with('=')
+                && !self.ime_composing && !just_committed_ime {
+                let direction=ctx.input(|i| {
+                    if i.modifiers!=egui::Modifiers::NONE {
+                        if i.modifiers.shift&&i.key_pressed(egui::Key::Enter){return Some(( -1isize,0isize,egui::Key::Enter,egui::Modifiers::SHIFT));}
+                        return None;
+                    }
+                    if i.key_pressed(egui::Key::ArrowLeft){Some((0isize,-1isize,egui::Key::ArrowLeft,egui::Modifiers::NONE))}
+                    else if i.key_pressed(egui::Key::ArrowRight){Some((0,1,egui::Key::ArrowRight,egui::Modifiers::NONE))}
+                    else if i.key_pressed(egui::Key::ArrowUp){Some((-1,0,egui::Key::ArrowUp,egui::Modifiers::NONE))}
+                    else if i.key_pressed(egui::Key::ArrowDown){Some((1,0,egui::Key::ArrowDown,egui::Modifiers::NONE))}else{None}
+                });
+                if let Some((dr,dc,key,mods))=direction {
+                    let consumed=ctx.input_mut(|i|i.consume_key(mods,key));
+                    if consumed {
+                        self.finish_shape_edit(true);
+                        self.move_table_cell_selection(id,row,col,dr,dc,false);
+                        ctx.request_repaint();return;
+                    }
+                }
+            }
+            // In reference mode, arrow keys choose a cell reference
+            // instead of moving the text caret. Repeated arrows replace the
+            // previous reference token so the expression remains editable.
+            if editor_focused && self.shape_edit_text.starts_with('=')
+                && !self.ime_composing && !just_committed_ime {
+                if ctx.input(|i|i.key_pressed(egui::Key::F2)&&i.modifiers==egui::Modifiers::NONE) {
+                    ctx.input_mut(|i|{i.consume_key(egui::Modifiers::NONE,egui::Key::F2);});
+                    self.formula_reference_mode=!self.formula_reference_mode;
+                    candidate_key_consumed=true;
+                } else if self.formula_reference_mode {
+                    let direction=ctx.input(|i| {
+                        let shift=i.modifiers.shift;
+                        if i.modifiers.command||i.modifiers.ctrl||i.modifiers.alt{return None;}
+                        if !shift&&candidates_visible&&(i.key_pressed(egui::Key::ArrowUp)||i.key_pressed(egui::Key::ArrowDown)){return None;}
+                        let direction=if i.key_pressed(egui::Key::ArrowLeft){Some((0isize,-1isize,egui::Key::ArrowLeft))}
+                        else if i.key_pressed(egui::Key::ArrowRight){Some((0,1,egui::Key::ArrowRight))}
+                        else if i.key_pressed(egui::Key::ArrowUp){Some((-1,0,egui::Key::ArrowUp))}
+                        else if i.key_pressed(egui::Key::ArrowDown){Some((1,0,egui::Key::ArrowDown))}else{None};
+                        direction.map(|(dr,dc,key)|(dr,dc,key,shift))
+                    });
+                    if let Some((dr,dc,key,extend_range))=direction {
+                        let modifiers=if extend_range{egui::Modifiers::SHIFT}else{egui::Modifiers::NONE};
+                        let consumed=ctx.input_mut(|i|i.consume_key(modifiers,key));
+                        if consumed {
+                            let old_target=self.formula_reference_target.unwrap_or((id,row,col));
+                            let (target_id,base_row,base_col)=old_target;
+                            let (target_rows,target_cols)=self.doc.shape(target_id).and_then(|s|s.table.as_ref())
+                                .map(|t|(t.cells.len(),t.cells.first().map_or(0,Vec::len))).unwrap_or((rows,cols));
+                            let nr=(base_row as isize+dr).clamp(0,target_rows.saturating_sub(1) as isize) as usize;
+                            let nc=(base_col as isize+dc).clamp(0,target_cols.saturating_sub(1) as isize) as usize;
+                            let anchor=if extend_range {
+                                self.formula_reference_anchor.unwrap_or(if self.formula_reference_target.is_some(){old_target}else{(id,row,col)})
+                            } else {(target_id,nr,nc)};
+                            self.formula_reference_anchor=Some(anchor);
+                            let active=(target_id,nr,nc);
+                            let column_name=|column:usize|{let mut text=String::new();let mut n=column+1;while n>0{let rem=(n-1)%26;text.insert(0,char::from(b'A'+rem as u8));n=(n-1)/26;}text};
+                            let (token_start,token_end)=if extend_range {
+                                let (anchor_id,ar,ac)=anchor;
+                                let endpoint=if anchor_id==target_id{format!("{}{}",column_name(nc),nr+1)}else{format!("{}:{}{}",target_id,column_name(nc),nr+1)};
+                                let startpoint=if anchor_id==id{format!("{}{}",column_name(ac),ar+1)}else{format!("{}:{}{}",anchor_id,column_name(ac),ar+1)};
+                                (startpoint,endpoint)
+                            }else{
+                                let single=if target_id==id{format!("{}{}",column_name(nc),nr+1)}else{format!("{}:{}{}",target_id,column_name(nc),nr+1)};
+                                (single.clone(),single)
+                            };
+                            let token=if token_start==token_end{token_start}else{format!("{}:{}",token_start,token_end)};
+                            let (start,end)=self.formula_reference_range.filter(|(_,end)|*end==cursor_byte)
+                                .unwrap_or((cursor_byte,cursor_byte));
+                            if start<=end&&end<=self.shape_edit_text.len() {
+                                self.shape_edit_text.replace_range(start..end,&token);
+                                let next_end=start+token.len();self.formula_reference_range=Some((start,next_end));
+                                let cursor_index=self.shape_edit_text[..next_end].chars().count();
+                                let mut state=egui::TextEdit::load_state(ctx,edit_id).unwrap_or_default();
+                                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(cursor_index))));
+                                state.store(ctx,edit_id);
+                                self.shape_edit_focus_pending=true;
+                            }
+                            self.formula_reference_target=Some(active);
+                            candidate_key_consumed=true;
+                            ctx.request_repaint();
+                        }
+                    }
+                }
+            }
+            if editor_focused&&!self.ime_composing&&!just_committed_ime {
+                if candidates_visible {
+                    let key=ctx.input(|i|{
+                        if i.key_pressed(egui::Key::ArrowUp){Some(egui::Key::ArrowUp)}
+                        else if i.key_pressed(egui::Key::ArrowDown){Some(egui::Key::ArrowDown)}
+                        else if i.key_pressed(egui::Key::Escape){Some(egui::Key::Escape)}
+                        else if i.key_pressed(egui::Key::Tab)&&!i.modifiers.shift{Some(egui::Key::Tab)}
+                        else{None}
+                    });
+                    if let Some(key)=key {
+                        match key {
+                            egui::Key::ArrowUp=>self.formula_candidate_index=self.formula_candidate_index.saturating_sub(1),
+                            egui::Key::ArrowDown=>self.formula_candidate_index=(self.formula_candidate_index+1).min(candidates.len()-1),
+                            egui::Key::Escape=>self.formula_candidates_hidden_prefix=completion.as_ref().map(|(_,_,prefix)|prefix.clone()),
+                            egui::Key::Tab=>if let Some((start,end,_))=completion.as_ref(){
+                                let insertion=format!("{}(",candidates[self.formula_candidate_index].insert_name);
+                                self.shape_edit_text.replace_range(*start..*end,&insertion);
+                                let cursor_index=self.shape_edit_text[..*start].chars().count()+insertion.chars().count();
+                                let mut state=egui::TextEdit::load_state(ctx,edit_id).unwrap_or_default();
+                                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(cursor_index))));
+                                state.store(ctx,edit_id);
+                                self.formula_candidate_index=0;
+                                self.formula_candidates_hidden_prefix=None;
+                            },
+                            _=>{}
+                        }
+                        ctx.input_mut(|i|{i.consume_key(egui::Modifiers::NONE,key);});
+                        candidate_key_consumed=true;
+                    }
+                }
+            }
+            if editor_focused&&!self.ime_composing&&!just_committed_ime&&!candidate_key_consumed {
+                let (movement,modifiers,delete_cell)=ctx.input(|i|{
+                    let movement=if i.key_pressed(egui::Key::Tab){Some((0,if i.modifiers.shift{-1}else{1},false,egui::Key::Tab))}
+                    else if i.key_pressed(egui::Key::Enter)&&!i.modifiers.shift&&!i.modifiers.command{Some((1,0,false,egui::Key::Enter))}
+                    else{None};(movement,i.modifiers,i.key_pressed(egui::Key::Delete)&&!i.modifiers.command&&!i.modifiers.alt)
+                });
+                if delete_cell {
+                    ctx.input_mut(|i|{i.consume_key(modifiers,egui::Key::Delete);});
+                    self.finish_shape_edit(true);
+                    let has_contents=self.doc.shape(id).and_then(|s|s.table.as_ref()).and_then(|t|t.cells.get(row)).and_then(|r|r.get(col)).is_some_and(|text|!text.is_empty());
+                    if has_contents {
+                        self.checkpoint();
+                        if let Some(table)=self.doc.shape_mut(id).and_then(|s|s.table.as_mut()){
+                            if let Some(value)=table.cells.get_mut(row).and_then(|r|r.get_mut(col)){value.clear();}
+                            table.formula_cells.retain(|coord|*coord!=(row,col));
+                        }
+                    }
+                    self.selected_table_cell=Some((id,row,col));
+                    self.selected_table_range=Some((id,row,col,row,col));
+                    ctx.request_repaint();
+                    return;
+                }
+                if let Some((dr,dc,extend,key))=movement {
+                    ctx.input_mut(|i|{i.consume_key(modifiers,key);});
+                    self.finish_shape_edit(true);
+                    self.move_table_cell_selection(id,row,col,dr,dc,extend);
+                    ctx.request_repaint();
+                    return;
+                }
+            }
+            let edit=egui::TextEdit::multiline(&mut self.shape_edit_text).id(edit_id)
+                .font(FontId::proportional(shape.style.text_size*self.zoom)).text_color(color_from_rgb(cell_text_color))
+                .align(edit_align).desired_width(cell.width()).desired_rows(1)
+                .return_key(Some(egui::KeyboardShortcut::new(egui::Modifiers::SHIFT,egui::Key::Enter)))
+                .event_filter(egui::EventFilter{tab:true,horizontal_arrows:true,vertical_arrows:true,..Default::default()})
+                .margin(egui::Margin::ZERO).frame(egui::Frame::NONE);
+            let response=cell_ui.add_sized(cell.size(),edit);
+            if let Some(reference_rect)=self.formula_reference_rect(id,origin) {
+                let color=Color32::from_rgb(39,128,228);
+                ui.painter().rect_stroke(reference_rect.shrink(1.5),0.0,Stroke::new(2.3,color),StrokeKind::Inside);
+                let handle=Rect::from_center_size(reference_rect.right_bottom(),egui::vec2(5.0,5.0));
+                ui.painter().rect_filled(handle,0.0,color);
+            }
+            if response.changed(){
+                if self.table_hidden_overwrite_selection {self.table_cell_input_mode=true;}
+                self.table_hidden_overwrite_selection=false;self.formula_candidates_hidden_prefix=None;self.formula_reference_range=None;self.formula_reference_anchor=None;
+                if self.shape_edit_text=="=" {self.formula_reference_mode=true;}
+                else if !self.shape_edit_text.starts_with('=') {self.formula_reference_mode=false;self.formula_reference_target=None;}
+            }
+            let mut suggestion_clicked=false;
+            if candidates_visible {
+                let mut clicked_candidate=None;
+                egui::Area::new(egui::Id::unique(("table-formula-suggestions",id)))
+                    .order(egui::Order::Foreground)
+                    .fixed_pos(egui::pos2(cell.left(),cell.bottom()+3.0))
+                    .show(ctx,|popup|egui::Frame::popup(popup.style()).show(popup,|popup|{
+                        popup.set_min_width(260.0);
+                        popup.set_max_width(340.0);
+                        egui::ScrollArea::vertical().max_height(160.0).show(popup,|list|{
+                            for (index,candidate) in candidates.iter().enumerate() {
+                                let label=format!("{}    {}",candidate.insert_name,candidate.function.japanese_description);
+                                if list.selectable_label(index==self.formula_candidate_index,label).clicked(){clicked_candidate=Some(index);}
+                            }
+                        });
+                        if let Some(candidate)=candidates.get(self.formula_candidate_index) {
+                            popup.separator();
+                            popup.strong(candidate.function.signature);
+                            if let Some(argument)=candidate.function.arguments.first(){popup.label(format!("{}: {}",argument.name,argument.description));}
+                            popup.weak(candidate.function.example);
+                        }
+                    }));
+                if let Some(index)=clicked_candidate{self.formula_candidate_index=index;}
+                suggestion_clicked=clicked_candidate.is_some();
+                if suggestion_clicked {response.request_focus();ctx.request_repaint();}
+                if let Some((start,end,_))=completion.as_ref(){
+                    if ctx.input(|i|i.key_pressed(egui::Key::Escape))&&!self.ime_composing&&!just_committed_ime {
+                        ctx.input_mut(|i|{i.consume_key(egui::Modifiers::NONE,egui::Key::Escape);});
+                        self.formula_candidates_hidden_prefix=completion.as_ref().map(|(_,_,prefix)|prefix.clone());
+                    }
+                    let _=(start,end);
+                }
+            }
+            if self.shape_edit_focus_pending {
+                response.request_focus();
+                if self.table_overwrite_pending {
+                    let mut state=egui::TextEdit::load_state(ctx,edit_id).unwrap_or_default();
+                    state.cursor.set_char_range(Some(egui::text::CCursorRange::select_all_str(&self.shape_edit_text)));
+                    state.store(ctx,edit_id);
+                    self.table_overwrite_pending=false;
+                }
+                self.shape_edit_focus_pending=false;
+            }
+            if ctx.input(|i|i.modifiers.shift&&i.key_pressed(egui::Key::Enter))&&!self.ime_composing&&!just_committed_ime {self.expand_table_row_for_newline(id,row);return;}
+            let esc=ctx.input(|i|i.key_pressed(egui::Key::Escape));
+            let commit=ctx.input(|i|i.modifiers.command&&i.key_pressed(egui::Key::Enter));
+            if esc&&!self.ime_composing&&!just_committed_ime {self.finish_shape_edit(false);}
+            else if (commit||(response.lost_focus()&&!suggestion_clicked))&&!self.ime_composing&&!just_committed_ime {self.finish_shape_edit(true);}
+            return;
+        }
         let fill=shape.style.fill.map(color_from_rgb).unwrap_or(if self.dark {Color32::from_rgb(34,40,54)}else{Color32::WHITE});
         let fg=color_from_rgb(shape.style.text);
         let area=if kind==ShapeKind::Frame {self.frame_header_screen_rect(id,origin).unwrap_or(bounds)}

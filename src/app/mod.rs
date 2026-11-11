@@ -1,6 +1,7 @@
 
-use crate::canvas_core::{CanvasTarget, ShapeKind, ConnectorEnd, Anchor, ConnectorRoute, TextHorizontal, TextVertical};
+use crate::canvas_core::{CanvasTarget, ShapeKind, ConnectorEnd, Anchor, ConnectorRoute, TextHorizontal, TextVertical, TableMerge, TableFilter, TableFilterCriterion, TableFilterOperator, TABLE_CELL_WIDTH, TABLE_CELL_HEIGHT, TableBorder, TableBorderDash};
 use crate::mindmap_core::{layout_with_widths, node_width_text, node_height_text, CopiedNode, Document, Node, NodeId, NodeLink, Offset, Position, ROOT};
+use crate::spreadsheet::WorkbookResult;
 use eframe::egui::{self, Align2, Color32, FontId, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use serde::{Deserialize, Serialize};
 use std::{collections::{HashMap, HashSet}, io::Write, path::{Path, PathBuf}, time::{Instant, SystemTime, UNIX_EPOCH}};
@@ -184,6 +185,28 @@ struct MindmapApp {
     insert_shape_mode: Option<ShapeKind>,
     insert_connector_mode: bool,
     editing_shape: Option<u64>,
+    editing_table_cell: Option<(usize, usize)>,
+    table_overwrite_pending: bool,
+    table_hidden_overwrite_selection: bool,
+    selected_table_cell: Option<(u64, usize, usize)>,
+    selected_table_range: Option<(u64, usize, usize, usize, usize)>,
+    table_selection_drag: Option<(u64, usize, usize)>,
+    table_selection_press: Option<(u64, usize, usize, Pos2)>,
+    table_fill_drag: Option<(u64, usize, usize, usize, usize, usize, usize)>,
+    formula_candidate_index: usize,
+    formula_candidates_hidden_prefix: Option<String>,
+    formula_reference_range: Option<(usize, usize)>,
+    formula_reference_mode: bool,
+    formula_reference_target: Option<(u64, usize, usize)>,
+    formula_reference_anchor: Option<(u64, usize, usize)>,
+    table_cell_input_mode: bool,
+    calculator: calculator::CalculatorState,
+    table_filter_popup: Option<(u64, usize, Pos2, HashSet<String>, Option<(TableFilterOperator,String)>)>,
+    pending_table_create: Option<(usize, usize)>,
+    table_fill_color: [u8;3],
+    table_text_color: [u8;3],
+    spreadsheet_cache: WorkbookResult,
+    spreadsheet_cache_key: u64,
     shape_edit_text: String,
     snap_to_grid: bool,
     /// Preserve the starting aspect ratio during Shift+drag resizing.
@@ -265,6 +288,7 @@ mod brainstorm;
 mod diagram;
 mod frame_grid_ui;
 mod i18n;
+mod calculator;
 
 use i18n::Language;
 
@@ -279,8 +303,9 @@ impl MindmapApp {
         let preferences = preferences_path().and_then(|p| std::fs::read(p).ok())
             .and_then(|b| serde_json::from_slice::<Preferences>(&b).ok())
             .unwrap_or_default();
-        let recent_files = preferences.recent_files.into_iter()
-            .filter(|path| path.is_file()).take(12).collect();
+        // Avoid synchronous filesystem probes during startup. Recent paths can
+        // include slow or disconnected volumes; open actions validate on use.
+        let recent_files = preferences.recent_files.into_iter().take(12).collect();
         #[cfg(not(test))]
         let initial_doc=if sample_100 { Document::sample_100() } else { Document::blank() };
         #[cfg(test)]
@@ -295,7 +320,9 @@ impl MindmapApp {
             editing_connector:None,connector_edit_text:String::new(),connector_edit_focus_pending:false,
              insert_connector_route:ConnectorRoute::Orthogonal,insert_connector_arrow:false,context_connector_point:Offset::default(),
             snap_guides:Vec::new(),context_shape:None,context_connector:None,
-            insert_shape_mode: None, insert_connector_mode: false, editing_shape: None,
+            insert_shape_mode: None, insert_connector_mode: false, editing_shape: None, editing_table_cell: None, table_overwrite_pending: false, table_hidden_overwrite_selection: false, selected_table_cell: None, selected_table_range: None, table_selection_drag: None, table_selection_press: None, table_fill_drag: None, formula_candidate_index:0, formula_candidates_hidden_prefix:None, formula_reference_range:None,formula_reference_mode:false,formula_reference_target:None,formula_reference_anchor:None,table_cell_input_mode:false, calculator:calculator::CalculatorState::default(),table_filter_popup:None, pending_table_create: None,
+            table_fill_color:[255,242,153],table_text_color:[38,52,75],
+            spreadsheet_cache: WorkbookResult::default(), spreadsheet_cache_key: 0,
             shape_edit_text: String::new(), snap_to_grid: preferences.snap_to_grid,
             shape_resize_aspect:None,
             icons: HashMap::new(), fit_pending: false, current_path: None, recent_files,
@@ -333,11 +360,15 @@ impl eframe::App for MindmapApp {
             }
         }
         let ctx = ui.ctx().clone();
+        if self.doc.shapes.iter().any(|shape|shape.table.as_ref().is_some_and(|table|!table.formula_cells.is_empty())) {
+            ctx.request_repaint_after(std::time::Duration::from_secs(60));
+        }
         // Also intercept the native window X button when changes are unsaved.
         if ctx.input(|i| i.viewport().close_requested()) && !self.exit_approved {
             // A focused inline editor may still hold unsaved text.
             self.finish_edit(true);
             self.finish_text_box_edit(true);
+            self.finish_shape_edit(true);
             if self.dirty {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 if !self.ask_discard { self.request_exit(&ctx); }
@@ -346,6 +377,7 @@ impl eframe::App for MindmapApp {
                 self.save_preferences();
             }
         }
+        self.calculator_keys(&ctx);
         self.handle_keys(&ctx);
         self.handle_canvas_keyboard(&ctx);
         egui::Panel::top("compact-ribbon")

@@ -2,6 +2,7 @@
 use super::*;
 use crate::mindmap_core::TextBox;
 use crate::canvas_core::{CanvasConnector, CanvasShape, CanvasLine};
+use crate::spreadsheet::remap_table_reference;
 
 /// Portable clipboard payload. Only connectors whose two ends were selected
 /// are copied; references to objects outside the selection are intentionally excluded.
@@ -130,6 +131,15 @@ impl MindmapApp {
             let old=s.id;
             s.id=self.doc.next_canvas_id;self.doc.next_canvas_id+=1;
             s.position.x+=36.0;s.position.y+=36.0;
+            if s.kind==ShapeKind::Table {
+                if let Some(table)=s.table.as_mut(){
+                    for (row,column) in table.formula_cells.clone(){
+                        if let Some(source)=table.cells.get(row).and_then(|r|r.get(column)).cloned(){
+                            if let Ok(rewritten)=remap_table_reference(&source,old,s.id){table.cells[row][column]=rewritten;}
+                        }
+                    }
+                }
+            }
             remap.insert(CanvasTarget::Shape(old),CanvasTarget::Shape(s.id));
             self.doc.shapes.push(s);
         }

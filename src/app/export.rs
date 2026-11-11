@@ -5,6 +5,7 @@ use crate::diagram_core::{route_points,point_at_fraction,shape_vertices};
 use crate::canvas_core::ConnectorDash;
 use std::{borrow::Cow, fmt::Write as _};
 use crate::canvas_core::{CanvasTarget, ShapeKind, Anchor};
+use crate::spreadsheet::{CellCoord, TableInput, display_literal, evaluate_workbook};
 
 const MARGIN: f32 = 48.0;
 
@@ -112,6 +113,20 @@ fn geometry(doc: &Document, positions: &HashMap<NodeId, Position>) -> Result<(f3
 /// White background ensures consistent appearance in image viewers/PowerPoint.
 pub(super) fn render_svg(doc: &Document) -> Result<Artwork, String> {
     doc.validate()?;
+    let tables:Vec<_>=doc.shapes.iter().filter_map(|shape|{
+        (shape.kind==ShapeKind::Table).then(||shape.table.as_ref().map(|table|(shape.id,table)))?
+    }).collect();
+    let formula_sets:Vec<HashSet<CellCoord>>=tables.iter().map(|(_,table)|table.formula_cells.iter()
+        .map(|(row,column)|CellCoord{row:*row,column:*column}).collect()).collect();
+    let manually_hidden_sets:Vec<HashSet<usize>>=tables.iter().map(|(_,table)|table.manually_hidden_rows.iter().copied().collect()).collect();
+    let filtered_sets:Vec<HashSet<usize>>=tables.iter().map(|(_,table)|(0..table.cells.len()).filter(|row|table.row_is_filtered_out(*row)).collect()).collect();
+    let merge_sets:Vec<Vec<_>>=tables.iter().map(|(_,table)|table.merged_cells.iter().map(|merge|
+        (merge.row,merge.column,merge.rows,merge.columns)).collect()).collect();
+    let inputs:Vec<_>=tables.iter().zip(formula_sets.iter()).zip(manually_hidden_sets.iter()).zip(filtered_sets.iter()).zip(merge_sets.iter())
+        .map(|(((((id,table),formulas),hidden),filtered),merges)|TableInput{
+            id:*id,cells:&table.cells,formula_cells:formulas,manually_hidden_rows:hidden,filtered_out_rows:filtered,merged_cells:merges,
+        }).collect();
+    let spreadsheet=evaluate_workbook(&inputs);
     let positions = layout_with_widths(doc, |id, depth| {
         doc.node(id).map(|n| node_width_text(&n.title, depth)).unwrap_or(150.0)
     });
@@ -301,12 +316,66 @@ pub(super) fn render_svg(doc: &Document) -> Result<Artwork, String> {
                 x+shape.width/2.0,y+shape.height/2.0,shape.width/2.0,shape.height/2.0,shape.style.stroke_width).unwrap();
         } else {
             let radius=if shape.kind==ShapeKind::RoundedRectangle {14.0}else{2.0};
+            let shape_stroke=if shape.kind==ShapeKind::Table{"none"}else{stroke.as_str()};
             writeln!(&mut svg,
-                r###"<rect x="{x:.2}" y="{y:.2}" width="{:.2}" height="{:.2}" rx="{radius}" fill="{fill}" stroke="{stroke}" stroke-width="{:.2}"/>"###,
+                r###"<rect x="{x:.2}" y="{y:.2}" width="{:.2}" height="{:.2}" rx="{radius}" fill="{fill}" stroke="{shape_stroke}" stroke-width="{:.2}"/>"###,
                 shape.width,shape.height,shape.style.stroke_width).unwrap();
         }
         let text_color=shape.style.text;
         let fg=format!("#{:02x}{:02x}{:02x}",text_color[0],text_color[1],text_color[2]);
+        if shape.kind==ShapeKind::Table {
+            if let Some(table)=shape.table.as_ref() {
+                let rows=table.cells.len();let cols=table.cells.first().map_or(0,Vec::len);
+                if rows>0&&cols>0 {
+                    for row in 0..rows {
+                        for col in 0..cols {
+                            if table.merge_at(row,col).is_some_and(|m|m.row!=row||m.column!=col){continue;}
+                            let merge=table.merge_at(row,col);
+                            let span_rows=merge.map_or(1,|m|m.rows);let span_cols=merge.map_or(1,|m|m.columns);
+                            let cx0=x+shape.width*col as f32/cols as f32;
+                            let cy0=y+table.row_offset(row);
+                            let cw=shape.width*span_cols as f32/cols as f32;let ch=(row..row+span_rows).map(|i|table.row_height(i)).sum::<f32>();
+                            let hidden_row=table.manually_hidden_rows.contains(&row)||table.row_is_filtered_out(row);
+                            let cell_fill=if hidden_row{"#e8e8e8".to_owned()}else{table.cell_fills.as_ref().and_then(|fills|fills.get(row)).and_then(|r|r.get(col)).copied().flatten()
+                                .map(|rgb|format!("#{:02x}{:02x}{:02x}",rgb[0],rgb[1],rgb[2]))
+                                .unwrap_or_else(||if table.header_row&&row==0{"#dae5fc".to_owned()}else if table.banded_rows&&row%2==1{"#f1f4fa".to_owned()}else{fill.clone()})};
+                            writeln!(&mut svg,r###"<rect x="{cx0:.2}" y="{cy0:.2}" width="{cw:.2}" height="{ch:.2}" fill="{cell_fill}"/>"###).unwrap();
+                            if hidden_row{continue;}
+                            let cx=cx0+cw/2.0;
+                            let cy=cy0+ch/2.0;
+                            let alignment=table.cell_alignments.as_ref().and_then(|a|a.get(row)).and_then(|a|a.get(col)).copied().unwrap_or(crate::canvas_core::TextHorizontal::Center);
+                            let text_rgb=table.cell_text_colors.as_ref().and_then(|colors|colors.get(row)).and_then(|r|r.get(col)).copied().flatten().unwrap_or(text_color);
+                            let cell_fg=format!("#{:02x}{:02x}{:02x}",text_rgb[0],text_rgb[1],text_rgb[2]);
+                            let (tx,anchor)=match alignment {
+                                crate::canvas_core::TextHorizontal::Left=>(cx0+4.0,"start"),
+                                crate::canvas_core::TextHorizontal::Center=>(cx,"middle"),
+                                crate::canvas_core::TextHorizontal::Right=>(cx0+cw-4.0,"end"),
+                            };
+                            let text=spreadsheet.display_value_at(shape.id,row,col)
+                                .map(|value|value.display_text()).unwrap_or_else(||display_literal(&table.cells[row][col]));
+                            let text_lines:Vec<_>=text.split('\n').collect();
+                            for (line_index,line_text) in text_lines.iter().enumerate() {
+                                let line_y=cy+(line_index as f32-(text_lines.len() as f32-1.0)/2.0)*shape.style.text_size*1.25;
+                                writeln!(&mut svg,r###"<text x="{tx:.2}" y="{line_y:.2}" text-anchor="{anchor}" dominant-baseline="central" font-family="Yu Gothic, Meiryo, Segoe UI, sans-serif" font-size="{:.2}" fill="{cell_fg}">{}</text>"###,
+                                    shape.style.text_size,xml_escape(line_text)).unwrap();
+                            }
+                        }
+                    }
+                    let default_border=crate::canvas_core::TableBorder{color:shape.style.outline.unwrap_or([128,158,210]),width:shape.style.stroke_width.max(0.8),dash:crate::canvas_core::TableBorderDash::Solid};
+                    for boundary in 0..=rows {for col in 0..cols {
+                        if table.merged_cells.iter().any(|m|boundary>m.row&&boundary<m.row+m.rows&&col>=m.column&&col<m.column+m.columns){continue;}
+                        let border=if let Some(grid)=&table.borders{grid.horizontal[boundary][col]}else{Some(default_border)};
+                        if let Some(border)=border {let color=format!("#{:02x}{:02x}{:02x}",border.color[0],border.color[1],border.color[2]);let dash=match border.dash{crate::canvas_core::TableBorderDash::Solid=>"none",crate::canvas_core::TableBorderDash::Dashed=>"6,4",crate::canvas_core::TableBorderDash::Dotted=>"1,3"};let x0=x+shape.width*col as f32/cols as f32;let x1=x+shape.width*(col+1) as f32/cols as f32;let cy=y+table.row_offset(boundary);writeln!(&mut svg,r###"<line x1="{x0:.2}" y1="{cy:.2}" x2="{x1:.2}" y2="{cy:.2}" stroke="{color}" stroke-width="{:.2}" stroke-dasharray="{dash}"/>"###,border.width).unwrap();}
+                    }}
+                    for row in 0..rows {for boundary in 0..=cols {
+                        if table.merged_cells.iter().any(|m|boundary>m.column&&boundary<m.column+m.columns&&row>=m.row&&row<m.row+m.rows){continue;}
+                        let border=if let Some(grid)=&table.borders{grid.vertical[row][boundary]}else{Some(default_border)};
+                        if let Some(border)=border {let color=format!("#{:02x}{:02x}{:02x}",border.color[0],border.color[1],border.color[2]);let dash=match border.dash{crate::canvas_core::TableBorderDash::Solid=>"none",crate::canvas_core::TableBorderDash::Dashed=>"6,4",crate::canvas_core::TableBorderDash::Dotted=>"1,3"};let cx=x+shape.width*boundary as f32/cols as f32;let y0=y+table.row_offset(row);let y1=y0+table.row_height(row);writeln!(&mut svg,r###"<line x1="{cx:.2}" y1="{y0:.2}" x2="{cx:.2}" y2="{y1:.2}" stroke="{color}" stroke-width="{:.2}" stroke-dasharray="{dash}"/>"###,border.width).unwrap();}
+                    }}
+                }
+            }
+            continue;
+        }
         let line_count=shape.text.lines().count().max(1);
         if shape.kind==ShapeKind::StickyNote {
             for (i,row) in shape.text.lines().enumerate() {
@@ -362,6 +431,7 @@ pub(super) fn render_png(doc: &Document) -> Result<(Vec<u8>, Vec<u8>, usize, usi
 
 impl MindmapApp {
     pub(super) fn export_file(&mut self, png: bool) {
+        self.finish_shape_edit(true);
         self.finish_edit(true);
         self.finish_text_box_edit(true);
         let ext = if png { "png" } else { "svg" };
@@ -387,6 +457,7 @@ impl MindmapApp {
     pub(super) fn copy_image(&mut self) {
         self.finish_edit(true);
         self.finish_text_box_edit(true);
+        self.finish_shape_edit(true);
         let result = render_png(&self.doc).and_then(|(_, pixels, width, height)| {
             let mut clip = arboard::Clipboard::new().map_err(|e| e.to_string())?;
             clip.set_image(arboard::ImageData {

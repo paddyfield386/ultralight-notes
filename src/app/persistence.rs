@@ -31,6 +31,7 @@ impl MindmapApp {
     pub(super) fn save_to(&mut self, path: PathBuf) -> bool {
         self.finish_edit(true);
         self.finish_text_box_edit(true);
+        self.finish_shape_edit(true);
         let path = ensure_json_extension(path);
         let result = self.doc.validate()
             .and_then(|_| serde_json::to_vec_pretty(&self.doc).map_err(|e| e.to_string()))
@@ -96,6 +97,7 @@ impl MindmapApp {
     pub(super) fn request_new(&mut self) {
         self.finish_edit(true);
         self.finish_text_box_edit(true);
+        self.finish_shape_edit(true);
         if self.dirty {
             self.pending_action = Some(PendingAction::New);
             self.ask_discard = true;
@@ -104,6 +106,7 @@ impl MindmapApp {
     pub(super) fn request_open(&mut self, path: PathBuf) {
         self.finish_edit(true);
         self.finish_text_box_edit(true);
+        self.finish_shape_edit(true);
         if self.dirty {
             self.pending_action = Some(PendingAction::Open(path));
             self.ask_discard = true;
@@ -112,6 +115,7 @@ impl MindmapApp {
     pub(super) fn request_exit(&mut self, ctx: &egui::Context) {
         self.finish_edit(true);
         self.finish_text_box_edit(true);
+        self.finish_shape_edit(true);
         if self.dirty {
             self.pending_action = Some(PendingAction::Exit);
             self.ask_discard = true;

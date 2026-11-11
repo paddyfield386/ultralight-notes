@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use crate::frame_grid::FrameGrid;
-use crate::canvas_core::{CanvasShape, CanvasLine, CanvasConnector, CanvasGroup, CanvasTarget, ShapeKind, CanvasStyle, ConnectorEnd, TextHorizontal, TextVertical, validate_shapes};
+use crate::canvas_core::{CanvasShape, CanvasLine, CanvasConnector, CanvasGroup, CanvasTarget, ShapeKind, CanvasStyle, ConnectorEnd, TextHorizontal, TextVertical, validate_shapes, TABLE_CELL_WIDTH, TABLE_CELL_HEIGHT, TABLE_INITIAL_ROWS, TABLE_INITIAL_COLUMNS};
 
 pub type NodeId = u64;
 pub const ROOT: NodeId = 1;
@@ -589,6 +589,7 @@ impl Document {
                 (grid.cell_width, grid.cell_height)
             },
             ShapeKind::Frame=>(360.0,240.0),
+            ShapeKind::Table=>(TABLE_CELL_WIDTH*TABLE_INITIAL_COLUMNS as f32,TABLE_CELL_HEIGHT*TABLE_INITIAL_ROWS as f32),
             _=>(180.0,100.0),
         };
         let mut style = CanvasStyle::default();
@@ -598,7 +599,8 @@ impl Document {
         self.shapes.push(CanvasShape { id, kind, position, width, height, z,
             visible: true, locked: false, style,
             text:if kind==ShapeKind::Frame {"Frame".into()}else{String::new()},members:Vec::new(),
-            grid:if kind==ShapeKind::Frame {Some(FrameGrid::default())} else {None} });
+            grid:if kind==ShapeKind::Frame {Some(FrameGrid::default())} else {None},
+            table:if kind==ShapeKind::Table {Some(Default::default())} else {None} });
         id
     }
     pub fn shape(&self, id: u64) -> Option<&CanvasShape> { self.shapes.iter().find(|s| s.id == id) }
